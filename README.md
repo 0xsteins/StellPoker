@@ -1,5 +1,7 @@
 # Stellar Poker
 
+See the contribution guide for issue follow-up workflow.
+
 [![CI](https://github.com/HitEmPoka/StellPoker/actions/workflows/ci.yml/badge.svg)](https://github.com/HitEmPoka/StellPoker/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -411,4 +413,3 @@ export function CreateTableButton() {
 - [Noir Testing Guide](docs/NOIR_TESTING_GUIDE.md)
 - [Local Committee Development Guide](docs/local-committee-dev-guide.md)
 - [Soroban Storage Optimization](docs/soroban-storage-optimization.md)
-
