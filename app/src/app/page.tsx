@@ -9,6 +9,8 @@ import { PixelChip } from "@/components/PixelChip";
 import { TransactionSimulation } from "@/components/TransactionSimulation";
 import { OddsCalculatorModal } from "@/components/OddsCalculatorModal";
 import { TokenSelector, type TokenChoice } from "@/components/TokenSelector";
+import { SpectatorCount } from "@/components/SpectatorCount";
+import { spectateHref } from "@/lib/spectator";
 import * as api from "@/lib/api";
 import { useJoinTableSimulation } from "@/lib/use-transaction-simulation";
 import {
@@ -1025,14 +1027,26 @@ export default function Home() {
                         {t.max_players - t.open_wallet_slots}/{t.max_players} SEATED
                         {isMyTable(t) ? " · YOU" : ""}
                       </span>
-                      <button
-                        onClick={() => handleJoinRow(t)}
-                        disabled={busy || !wallet}
-                        className="pixel-btn pixel-btn-blue text-[9px]"
-                        style={{ padding: "6px 12px" }}
-                      >
-                        JOIN
-                      </button>
+                      <SpectatorCount count={t.spectators ?? 0} hideWhenZero size="sm" />
+                      <div className="flex gap-1">
+                        {/* Spectating needs no wallet (Issue #171). */}
+                        <Link
+                          href={spectateHref(t.table_id)}
+                          className="pixel-btn text-[9px]"
+                          style={{ padding: "6px 10px" }}
+                          data-testid={`spectate-${t.table_id}`}
+                        >
+                          WATCH
+                        </Link>
+                        <button
+                          onClick={() => handleJoinRow(t)}
+                          disabled={busy || !wallet}
+                          className="pixel-btn pixel-btn-blue text-[9px]"
+                          style={{ padding: "6px 12px" }}
+                        >
+                          JOIN
+                        </button>
+                      </div>
                     </div>
                     {/* Friend-occupied indicator (#168) */}
                     {(() => {

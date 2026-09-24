@@ -161,6 +161,8 @@ pub struct OpenTableInfo {
     pub max_players: u32,
     pub joined_wallets: usize,
     pub open_wallet_slots: usize,
+    /// Live anonymous spectators (Issue #171).
+    pub spectators: usize,
 }
 
 /// Multi-table overview entry for the mini-map (Issue #53).
@@ -172,6 +174,14 @@ pub struct TableOverviewInfo {
     pub seated: usize,
     pub total_chips: i64,
     pub stacks: Vec<i64>,
+    /// Live anonymous spectators (Issue #171).
+    pub spectators: usize,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SpectatorCountResponse {
+    pub table_id: u32,
+    pub spectator_count: usize,
 }
 
 #[derive(Serialize, ToSchema)]

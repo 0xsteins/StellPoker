@@ -77,6 +77,7 @@ mod session_gc;
 mod session_migration;
 mod session_recovery;
 mod soroban;
+mod spectators;
 mod stats;
 mod telemetry;
 mod tls_client;
@@ -296,6 +297,8 @@ struct AppState {
     /// Per-table broadcast channels for `/api/table/:table_id/state/ws`
     /// (Issue #105 — real-time game state push).
     game_state_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
+    /// Live anonymous spectator counts per table (Issue #171).
+    spectators: spectators::SpectatorRegistry,
     mpc_sessions: session_gc::SessionStore,
     stats: stats::StatsStore,
     feature_flags: feature_flags::FeatureFlagStore,
@@ -748,6 +751,7 @@ async fn main() {
         metrics: metrics.clone(),
         chat_channels: Arc::new(Mutex::new(HashMap::new())),
         game_state_channels: Arc::new(Mutex::new(HashMap::new())),
+        spectators: spectators::SpectatorRegistry::new(),
         mpc_sessions,
         stats: stats_store,
         feature_flags: feature_flag_store,
@@ -1045,6 +1049,8 @@ async fn main() {
         .route("/api/committee/status", get(api::committee_status))
         .route("/api/table/:table_id/chat/ws", get(chat_ws_handler))
         .route("/api/table/:table_id/state/ws", get(game_state_ws_handler))
+        .route("/api/table/:table_id/spectate/ws", get(spectate_ws_handler))
+        .route("/api/table/:table_id/spectators", get(api::get_spectator_count))
         .route(
             "/api/session/:session_id/cancel",
             post(api::cancel_mpc_session),
@@ -1519,6 +1525,40 @@ async fn handle_game_state_socket(socket: WebSocket, table_id: u32, state: AppSt
     tokio::select! {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
+    }
+}
+
+/// GET /api/table/{table_id}/spectate/ws
+///
+/// Anonymous spectator stream (Issue #171). No wallet or auth required.
+/// Delivers the same public game-state snapshots as `/state/ws` (community
+/// cards, phase, on-chain betting state — never hole cards) and counts the
+/// connection towards the table's spectator indicator for as long as it
+/// stays open. Every join/leave broadcasts a `{"type":"spectators"}` frame
+/// on the table's game-state channel.
+async fn spectate_ws_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::Path(table_id): axum::extract::Path<u32>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_spectator_socket(socket, table_id, state))
+}
+
+async fn handle_spectator_socket(socket: WebSocket, table_id: u32, state: AppState) {
+    let guard = state.spectators.join(table_id);
+    broadcast_spectator_count(&state, table_id).await;
+
+    handle_game_state_socket(socket, table_id, state.clone()).await;
+
+    drop(guard);
+    broadcast_spectator_count(&state, table_id).await;
+}
+
+async fn broadcast_spectator_count(state: &AppState, table_id: u32) {
+    let msg = spectators::spectator_count_message(table_id, state.spectators.count(table_id));
+    let channels = state.game_state_channels.lock().await;
+    if let Some(tx) = channels.get(&table_id) {
+        let _ = tx.send(msg);
     }
 }
 

@@ -66,6 +66,23 @@ export interface GameStateEvent {
   reveal_tx_hashes: Record<string, string>;
   showdown_tx_hash: string | null;
   onchain_state: string | null;
+  /** Live anonymous spectators on this table (Issue #171). */
+  spectator_count?: number;
+}
+
+/** Pushed on a table's game-state channel whenever its spectator count changes (Issue #171). */
+export interface SpectatorCountEvent {
+  type: "spectators";
+  table_id: number;
+  spectator_count: number;
+}
+
+export type GameStateSocketMessage = GameStateEvent | SpectatorCountEvent;
+
+export function isSpectatorCountEvent(
+  msg: GameStateSocketMessage
+): msg is SpectatorCountEvent {
+  return (msg as SpectatorCountEvent).type === "spectators";
 }
 
 /** Derives the coordinator's ws(s):// origin from its http(s):// base URL. */
@@ -86,7 +103,8 @@ export interface GameStateSocketHandle {
  */
 export function subscribeGameState(
   tableId: number,
-  onUpdate: (event: GameStateEvent) => void
+  onUpdate: (event: GameStateSocketMessage) => void,
+  options: { spectate?: boolean } = {}
 ): GameStateSocketHandle | null {
   if (typeof WebSocket === "undefined") {
     return null;
@@ -98,12 +116,16 @@ export function subscribeGameState(
 
   const connect = () => {
     if (!active) return;
-    const wsUrl = `${coordinatorWsBase()}/api/table/${tableId}/state/ws`;
+    // Spectators connect to `/spectate/ws`, which carries the same public
+    // snapshots but counts the connection towards the table's spectator
+    // indicator (Issue #171). No wallet or auth is needed for either.
+    const path = options.spectate ? "spectate/ws" : "state/ws";
+    const wsUrl = `${coordinatorWsBase()}/api/table/${tableId}/${path}`;
     ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
       try {
-        onUpdate(JSON.parse(event.data) as GameStateEvent);
+        onUpdate(JSON.parse(event.data) as GameStateSocketMessage);
       } catch {
         // Ignore malformed frames.
       }
@@ -170,6 +192,8 @@ export interface OpenTableInfo {
   max_players: number;
   joined_wallets: number;
   open_wallet_slots: number;
+  /** Live anonymous spectators (Issue #171). Absent on older coordinators. */
+  spectators?: number;
 }
 
 export interface OpenTablesResponse {
@@ -184,6 +208,8 @@ export interface TableOverviewInfo {
   seated: number;
   total_chips: number;
   stacks: number[];
+  /** Live anonymous spectators (Issue #171). Absent on older coordinators. */
+  spectators?: number;
 }
 
 export interface TableOverviewResponse {
@@ -580,6 +606,22 @@ export async function getTableState(
   const res = await fetch(`${API_BASE}/api/table/${tableId}/state`);
   if (!res.ok) {
     throw new Error(await readApiError(res, `Failed to get table state: ${res.status}`));
+  }
+  return res.json();
+}
+
+export interface SpectatorCountResponse {
+  table_id: number;
+  spectator_count: number;
+}
+
+/** Public, unauthenticated spectator count for a table (Issue #171). */
+export async function getSpectatorCount(
+  tableId: number
+): Promise<SpectatorCountResponse> {
+  const res = await fetch(`${API_BASE}/api/table/${tableId}/spectators`);
+  if (!res.ok) {
+    throw new Error(await readApiError(res, `Failed to get spectators: ${res.status}`));
   }
   return res.json();
 }
