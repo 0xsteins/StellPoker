@@ -28,6 +28,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Check workspace
         run: cargo check --workspace
 
@@ -163,14 +166,17 @@ jobs:
             circuits/**/target
           key: ${{ runner.os }}-circuits-1.0.0-beta.17-${{ hashFiles('circuits/**/src/**/*.nr', 'circuits/**/Nargo.toml') }}
 
-      - name: Compile all Noir circuits
-        run: ./scripts/compile-circuits.sh
-
       - name: Install Nargo for tests
         run: |
           curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash
           echo "$HOME/.nargo/bin" >> $GITHUB_PATH
           $HOME/.nargo/bin/noirup -v 1.0.0-beta.17
+
+      - name: Check all circuits
+        run: nargo check --all
+
+      - name: Compile all Noir circuits
+        run: ./scripts/compile-circuits.sh
 
       - name: Run Noir library tests
         run: cd circuits/lib && nargo test

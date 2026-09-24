@@ -854,4 +854,6 @@ pub enum DataKey {
     JackpotVerifier(u32),
     /// Jackpot claim history: (table_id, hand_number) -> Address claimant
     JackpotClaim(u32, u32),
+    /// Commit-reveal scheme: action hash commitment: (table_id, hand_number, seat) -> hash
+    ActionCommitmentHash(u32, u32, u32),
 }
