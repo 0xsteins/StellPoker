@@ -238,15 +238,20 @@ body {
   animation: cardDeal 0.3s ease-out forwards;
 }
 
-/* 3D card flip for deal (hole cards) and reveal (community cards).
-   The outer element provides the 3D perspective and a subtle slide-in; the
-   inner element rotates from showing the back (180deg) to the front (0deg).
-   `--flip-delay` is set per-card to stagger consecutive cards. */
+/* Card dealing: slide from the deck (table center) to the seat, landing
+   with a 3D back-to-front flip. The outer element provides the 3D
+   perspective plus the deck-to-seat slide (`cardDealSlide`, driven by
+   `--deal-x`/`--deal-y` — the deck's offset from this card's own resting
+   position, in px); the inner element rotates from the back (180deg) to
+   the front (0deg). `--flip-delay` staggers consecutive cards so they
+   don't all land at once. Uses only `transform`/`opacity` so the browser
+   can animate both on the compositor thread. */
 .card-flip {
   position: relative;
   perspective: 600px;
-  animation: cardSlideIn 0.3s ease-out both;
+  animation: cardDealSlide 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
   animation-delay: var(--flip-delay, 0s);
+  will-change: transform, opacity;
 }
 
 .card-flip-inner {
@@ -255,7 +260,8 @@ body {
   height: 100%;
   transform-style: preserve-3d;
   animation: cardFlip 0.3s ease-out both;
-  animation-delay: var(--flip-delay, 0s);
+  animation-delay: calc(var(--flip-delay, 0s) + 0.2s);
+  will-change: transform;
 }
 
 .card-flip-face {
@@ -273,9 +279,18 @@ body {
   100% { transform: rotateY(0deg); }
 }
 
-@keyframes cardSlideIn {
-  0% { transform: translateY(-10px); opacity: 0; }
-  100% { transform: translateY(0); opacity: 1; }
+@keyframes cardDealSlide {
+  0% {
+    transform: translate(var(--deal-x, 0px), var(--deal-y, -60px)) scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
 }
 
 /* Accessibility: show cards instantly when reduced motion is preferred. */
