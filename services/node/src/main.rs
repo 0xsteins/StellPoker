@@ -71,6 +71,8 @@ pub struct NodeState {
     /// once a session has finished, the coordinator cannot reopen it by
     /// resubmitting shares under the same session_id.
     pub finalized_sessions: Arc<RwLock<HashSet<String>>>,
+    /// Replay protection: (session_id, source_party_id) -> seen nonces (Issue #500).
+    pub seen_share_nonces: Arc<RwLock<HashMap<(String, u32), HashSet<u64>>>>,
 }
 
 #[tokio::main]
@@ -177,6 +179,7 @@ async fn main() {
         limits,
         metrics: NodeMetrics::new(),
         finalized_sessions: Arc::new(RwLock::new(HashSet::new())),
+        seen_share_nonces: Arc::new(RwLock::new(HashMap::new())),
     };
 
     // ── Peer connection pool health checks (Issue #246) ─────────────────────

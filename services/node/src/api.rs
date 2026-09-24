@@ -43,12 +43,14 @@ pub struct DispatchSharesRequest {
     pub circuit_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct SharesRequest {
     pub circuit_name: String,
     pub share_data: String, // base64-encoded share file
     pub source_party_id: u32,
     pub total_parties: u32,
+    #[serde(default)]
+    pub nonce: u64,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +247,30 @@ pub async fn post_shares(
             StatusCode::BAD_REQUEST,
             "total_parties must be > 0".to_string(),
         ));
+    }
+
+    // Issue #500: Replay protection for MPC phase messages.
+    // Verify that the per-message nonce from this peer has not been seen before.
+    if req.nonce > 0 {
+        let mut seen = state.seen_share_nonces.write().await;
+        let nonces = seen
+            .entry((session_id.clone(), req.source_party_id))
+            .or_default();
+        if !nonces.insert(req.nonce) {
+            tracing::warn!(
+                peer = req.source_party_id,
+                session_id = %session_id,
+                nonce = req.nonce,
+                "rejected replayed MPC share message"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "duplicate/replayed share message from peer {} (nonce {})",
+                    req.source_party_id, req.nonce
+                ),
+            ));
+        }
     }
 
     // Reject a replayed/duplicate initiation of a session that already
@@ -567,6 +593,7 @@ mod replay_protection_tests {
             limits: ResourceLimits::default(),
             metrics: NodeMetrics::new(),
             finalized_sessions: Arc::new(RwLock::new(HashSet::new())),
+            seen_share_nonces: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -576,6 +603,7 @@ mod replay_protection_tests {
             share_data: "dGVzdA==".to_string(), // base64("test")
             source_party_id: 0,
             total_parties: 3,
+            nonce: 0,
         }
     }
 
@@ -666,5 +694,36 @@ mod replay_protection_tests {
         .await;
 
         assert_eq!(result.unwrap(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_replayed_share_nonce_from_peer() {
+        let state = test_state();
+        let session_id = "session-nonce-replay".to_string();
+
+        let mut req = shares_req();
+        req.nonce = 12345;
+
+        // First attempt succeeds
+        let res1 = post_shares(
+            State(state.clone()),
+            Path(session_id.clone()),
+            Json(req.clone()),
+        )
+        .await;
+        assert_eq!(res1.unwrap(), StatusCode::OK);
+
+        // Immediate replay with same nonce from same peer is rejected
+        let res2 = post_shares(
+            State(state),
+            Path(session_id),
+            Json(req),
+        )
+        .await;
+
+        let err = res2.expect_err("expected duplicate nonce replay rejection");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1.contains("duplicate/replayed share message"));
+        assert!(err.1.contains("peer 0"));
     }
 }
