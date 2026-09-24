@@ -5,6 +5,8 @@ use crate::types::*;
 
 /// Maximum allowed rake, in basis points (5%). Enforced at table creation.
 pub const MAX_RAKE_BPS: u32 = 500;
+pub const DEFAULT_VARIANCE_THRESHOLD_BPS: u32 = 2_500;
+pub const DEFAULT_VARIANCE_JACKPOT_SHARE_BPS: u32 = 1_000;
 
 /// Default minimum hand category for bad-beat qualification (7 = FourOfAKind).
 #[allow(dead_code)]
@@ -32,6 +34,26 @@ pub fn split_jackpot_rake(total_rake: i128, jackpot_share_bps: u32) -> (i128, i1
     let jackpot = (total_rake * jackpot_share_bps as i128) / 10_000;
     let house = total_rake - jackpot;
     (house, jackpot)
+}
+
+/// Calculate distribution variance in basis points. A perfectly even winner
+/// distribution is zero; a single seat winning every hand approaches 10,000.
+pub fn outcome_variance_bps(stats: &VarianceStats, player_count: u32) -> u32 {
+    if stats.hands == 0 || player_count < 2 {
+        return 0;
+    }
+
+    let hands = stats.hands as i128;
+    let players = player_count as i128;
+    let mut squared_deviation = 0i128;
+    for seat in 0..player_count {
+        let count = stats.winner_counts.get(seat).unwrap_or(0) as i128;
+        let deviation = count * players - hands;
+        squared_deviation += deviation * deviation;
+    }
+
+    let denominator = hands * hands * players;
+    ((squared_deviation * 10_000) / denominator) as u32
 }
 
 /// Deduct rake from each pot before distribution. Rake is computed per pot as
@@ -409,6 +431,59 @@ fn best_eligible_winner(ranked: &Vec<u32>, eligible: &Vec<u32>) -> Option<u32> {
     None
 }
 
+/// Split a pot 50/50 between the best high hand and the best qualifying low
+/// hand. The low hand qualifies if it is 8-or-better (the traditional Omaha
+/// Hi-Lo / Stud Hi-Lo rule): no card in the low hand may rank above 8 (where
+/// Ace is high). In a split-pot game each eligible pot is divided evenly between
+/// the high and low winners; odd chips go to the high winner.
+///
+/// `high_ranking` and `low_ranking` are seat-index lists ordered best-first for
+/// their respective evaluations. `low_qualified` flags whether the best low
+/// candidate actually qualifies.
+pub fn distribute_split_pots(
+    env: &Env,
+    table: &mut TableState,
+    pots: &Vec<SidePot>,
+    high_ranking: &Vec<u32>,
+    low_ranking: &Vec<u32>,
+    low_qualified: bool,
+) -> Result<Vec<(u32, i128)>, PokerTableError> {
+    let mut payouts: Vec<(u32, i128)> = Vec::new(env);
+
+    for pi in 0..pots.len() {
+        let pot = pots.get(pi).ok_or(PokerTableError::InvalidPlayerIndex)?;
+        if pot.amount <= 0 {
+            continue;
+        }
+
+        // High winner is always the best eligible from high_ranking.
+        let high_winner = best_eligible_winner(high_ranking, &pot.eligible_players)
+            .ok_or(PokerTableError::WinnerNotEligibleForPot)?;
+
+        if low_qualified {
+            // Low winner is the best eligible from low_ranking.
+            let low_winner = best_eligible_winner(low_ranking, &pot.eligible_players)
+                .ok_or(PokerTableError::WinnerNotEligibleForPot)?;
+
+            let half = pot.amount / 2;
+            let remainder = pot.amount - half;
+
+            if high_winner == low_winner {
+                // Same player wins both halves — entire pot goes to them.
+                credit_player(table, &mut payouts, high_winner, pot.amount)?;
+            } else {
+                credit_player(table, &mut payouts, high_winner, remainder)?;
+                credit_player(table, &mut payouts, low_winner, half)?;
+            }
+        } else {
+            // Low does not qualify — high takes the whole pot.
+            credit_player(table, &mut payouts, high_winner, pot.amount)?;
+        }
+    }
+
+    Ok(payouts)
+}
+
 /// Add `amount` to the running total for `seat`, merging into an existing entry
 /// when a seat wins more than one pot.
 fn accumulate_payout(payouts: &mut Vec<(u32, i128)>, seat: u32, amount: i128) {
@@ -458,8 +533,8 @@ mod pot_test {
                 token: Address::generate(env),
                 min_buy_in: 0,
                 max_buy_in: i128::MAX,
-                small_blind: 0,
-                big_blind: 0,
+                betting_structure: crate::types::BettingStructure::NoLimit,
+                blinds_schedule: BlindsSchedule::fixed(env, 0, 0),
                 min_players: 2,
                 max_players: 9,
                 timeout_ledgers: 0,
@@ -492,6 +567,8 @@ mod pot_test {
             rit_state: None,
             jackpot_balance: 0,
             last_raise_size: 0,
+            current_blind_level: 0,
+            level_started_at: 0,
         }
     }
 

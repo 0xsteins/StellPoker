@@ -71,11 +71,30 @@ pub fn process_action(
             if current_bet != 0 {
                 return Err(PokerTableError::CannotBetWhenOutstandingBet);
             }
-            if *amount < table.config.big_blind {
+            let big_blind = game::current_blind_level(table)?.big_blind;
+            if *amount < big_blind {
                 return Err(PokerTableError::BetTooSmall);
             }
             if *amount > p.stack {
                 return Err(PokerTableError::NotEnoughChips);
+            }
+
+            match table.config.betting_structure {
+                BettingStructure::NoLimit => {}
+                BettingStructure::PotLimit => {
+                    if *amount > table.pot {
+                        return Err(PokerTableError::ExceedsPotLimit);
+                    }
+                }
+                BettingStructure::FixedLimit(ref cfg) => {
+                    let allowed_bet = match table.phase {
+                        GamePhase::Preflop | GamePhase::Flop => cfg.small_bet,
+                        _ => cfg.big_bet,
+                    };
+                    if *amount != allowed_bet {
+                        return Err(PokerTableError::InvalidFixedLimitBet);
+                    }
+                }
             }
 
             p.stack -= *amount;
@@ -90,16 +109,51 @@ pub fn process_action(
             table.players.set(seat, p);
         }
         Action::Raise(amount) => {
+            // Enforce straddle re-raise rights: when the active straddle is live-only
+            // but `allow_reraise` is false, the straddler cannot re-raise.
+            if env
+                .storage()
+                .instance()
+                .get::<DataKey, ActiveStraddle>(&DataKey::ActiveStraddleState(table.id))
+                .map(|a| a.seat == seat && !a.allow_reraise)
+                .unwrap_or(false)
+            {
+                // Only allow the forced reraise restriction during Preflop where the straddle matters
+                if matches!(table.phase, GamePhase::Preflop) {
+                    return Err(PokerTableError::RaiseTooSmall);
+                }
+            }
             let to_call = current_bet - p.bet_this_round;
             let total_needed = to_call + *amount;
             // Standard poker minimum-raise rule: the raise increment must be at
-            // least as large as the previous bet or raise in this round.
-            let min_raise = core::cmp::max(table.last_raise_size, table.config.big_blind);
+            // least as large as the previous bet or raise in this round, or the
+            // current blind level's big blind if no raise has happened yet.
+            let current_big_blind = game::current_blind_level(table)?.big_blind;
+            let min_raise = core::cmp::max(table.last_raise_size, current_big_blind);
             if *amount < min_raise {
                 return Err(PokerTableError::RaiseTooSmall);
             }
             if total_needed > p.stack {
                 return Err(PokerTableError::NotEnoughChips);
+            }
+
+            match table.config.betting_structure {
+                BettingStructure::NoLimit => {}
+                BettingStructure::PotLimit => {
+                    let max_raise = table.pot + to_call;
+                    if *amount > max_raise {
+                        return Err(PokerTableError::ExceedsPotLimit);
+                    }
+                }
+                BettingStructure::FixedLimit(ref cfg) => {
+                    let allowed_bet = match table.phase {
+                        GamePhase::Preflop | GamePhase::Flop => cfg.small_bet,
+                        _ => cfg.big_bet,
+                    };
+                    if *amount != allowed_bet {
+                        return Err(PokerTableError::InvalidFixedLimitBet);
+                    }
+                }
             }
 
             p.stack -= total_needed;
@@ -170,7 +224,13 @@ pub fn reset_round(env: &Env, table: &mut TableState) -> Result<(), PokerTableEr
     }
 
     // Reset minimum raise size to one big blind for the new betting round.
-    table.last_raise_size = table.config.big_blind;
+    table.last_raise_size = match table.config.betting_structure {
+        BettingStructure::FixedLimit(ref cfg) => match table.phase {
+            GamePhase::Preflop | GamePhase::Flop => cfg.small_bet,
+            _ => cfg.big_bet,
+        },
+        _ => game::current_blind_level(table)?.big_blind,
+    };
 
     // First active player after dealer acts first post-flop
     let num_players = table.players.len() as u32;
@@ -183,7 +243,7 @@ pub fn reset_round(env: &Env, table: &mut TableState) -> Result<(), PokerTableEr
             .players
             .get(seat)
             .ok_or(PokerTableError::InvalidPlayerIndex)?;
-        if !p.folded && !p.all_in {
+        if !p.folded && !p.all_in && !p.sitting_out && p.stack > 0 {
             table.current_turn = seat;
             return Ok(());
         }
@@ -208,7 +268,7 @@ fn advance_turn(env: &Env, table: &mut TableState) -> Result<(), PokerTableError
             .players
             .get(next)
             .ok_or(PokerTableError::InvalidPlayerIndex)?;
-        if !p.folded && !p.all_in {
+        if !p.folded && !p.all_in && !p.sitting_out && p.stack > 0 {
             break;
         }
         next = (next + 1) % num_players;
@@ -231,7 +291,7 @@ fn is_round_complete(table: &TableState) -> Result<bool, PokerTableError> {
             .players
             .get(i)
             .ok_or(PokerTableError::InvalidPlayerIndex)?;
-        if p.folded || p.all_in {
+        if p.folded || p.all_in || p.sitting_out || p.stack == 0 {
             continue;
         }
         if p.bet_this_round != current_bet {

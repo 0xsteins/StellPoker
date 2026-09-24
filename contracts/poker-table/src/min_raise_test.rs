@@ -84,8 +84,8 @@ fn two_player_table(
             token: admin.clone(),
             min_buy_in: 0,
             max_buy_in: i128::MAX,
-            small_blind,
-            big_blind,
+            betting_structure: crate::types::BettingStructure::NoLimit,
+            blinds_schedule: BlindsSchedule::fixed(env, small_blind, big_blind),
             min_players: 2,
             max_players: 6,
             timeout_ledgers: 0,
@@ -117,6 +117,9 @@ fn two_player_table(
         hand_actions: Vec::new(env),
         jackpot_balance: 0,
         last_raise_size: big_blind,
+        rit_state: None,
+        current_blind_level: 0,
+        level_started_at: 0,
     };
 
     // Post SB/BB manually so both players have placed their blinds.
@@ -149,7 +152,9 @@ fn act(
     player: &Address,
     action: &Action,
 ) -> Result<(), PokerTableError> {
-    env.as_contract(poker, || betting::process_action(env, table, player, action))
+    env.as_contract(poker, || {
+        betting::process_action(env, table, player, action)
+    })
 }
 
 // ---------------------------------------------------------------------------

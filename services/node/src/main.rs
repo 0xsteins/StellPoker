@@ -24,28 +24,33 @@
 //! When a pin is set, the node demands mutual TLS (mTLS) and rejects any
 //! connection whose client certificate does not match the pin.
 
+mod config_validation;
 mod crypto;
 
 use axum::{
     routing::{get, post},
     Router,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 mod api;
+mod gossip;
+mod heartbeat;
 mod limits;
 mod metrics;
+mod pool;
 mod private_table;
 mod redact;
+mod profiling;
 mod session;
 mod tls;
-mod heartbeat;
 
 use limits::ResourceLimits;
 use metrics::NodeMetrics;
 use private_table::PrivateTableState;
+use profiling::ProfileRegistry;
 use session::MpcSessionState;
 
 #[derive(Clone)]
@@ -59,6 +64,16 @@ pub struct NodeState {
     pub limits: ResourceLimits,
     /// Prometheus metrics: active sessions, proofs generated, error counts (Issue #101).
     pub metrics: NodeMetrics,
+    /// Session IDs that have already completed proof generation (issue #241).
+    ///
+    /// Kept independently of `sessions` (which is never pruned today, but is
+    /// not guaranteed to stay that way) so a replayed session_id is rejected
+    /// even if the corresponding entry in `sessions` were ever removed —
+    /// once a session has finished, the coordinator cannot reopen it by
+    /// resubmitting shares under the same session_id.
+    pub finalized_sessions: Arc<RwLock<HashSet<String>>>,
+    /// Replay protection: (session_id, source_party_id) -> seen nonces (Issue #500).
+    pub seen_share_nonces: Arc<RwLock<HashMap<(String, u32), HashSet<u64>>>>,
 }
 
 #[tokio::main]
@@ -74,6 +89,26 @@ async fn main() {
             .with_writer(redact::RedactingMakeWriter::new(std::io::stdout))
             .init();
     }
+
+    // ── Startup configuration validation (Issue #240) ───────────────────────
+    let validation = config_validation::validate_config().await;
+    for warning in &validation.warnings {
+        tracing::warn!("config validation: {}", warning);
+    }
+    if !validation.is_ok() {
+        for error in &validation.errors {
+            tracing::error!("config validation: {}", error);
+        }
+        tracing::error!(
+            "MPC node startup aborted: {} configuration error(s) found",
+            validation.errors.len()
+        );
+        std::process::exit(1);
+    }
+    tracing::info!(
+        "Configuration validation passed ({} warning(s))",
+        validation.warnings.len()
+    );
 
     let node_id: u32 = std::env::var("NODE_ID")
         .unwrap_or_else(|_| "0".to_string())
@@ -115,6 +150,23 @@ async fn main() {
         limits.max_session_wall_seconds,
     );
 
+    // ── Startup configuration validation (Issue #240) ────────────────────────
+    let report = config_validation::validate_config().await;
+    for w in &report.warnings {
+        tracing::warn!("config: {}", w);
+    }
+    if !report.is_ok() {
+        for e in &report.errors {
+            tracing::error!("config: {}", e);
+        }
+        tracing::error!(
+            "MPC node refusing to start due to {} configuration error(s)",
+            report.errors.len()
+        );
+        std::process::exit(1);
+    }
+    tracing::info!("Configuration validation passed");
+
     // ── TLS configuration ────────────────────────────────────────────────────
     let tls_cfg = match tls::load_from_env() {
         Ok(cfg) => cfg,
@@ -129,10 +181,66 @@ async fn main() {
         sessions: Arc::new(RwLock::new(HashMap::new())),
         tables: Arc::new(RwLock::new(HashMap::new())),
         party_config_path,
-        peer_http_endpoints,
+        peer_http_endpoints: peer_http_endpoints.clone(),
         limits,
         metrics: NodeMetrics::new(),
+        finalized_sessions: Arc::new(RwLock::new(HashSet::new())),
+        seen_share_nonces: Arc::new(RwLock::new(HashMap::new())),
     };
+
+    // ── Peer connection pool health checks (Issue #246) ─────────────────────
+    pool::spawn_health_checks(peer_http_endpoints.clone());
+
+    // ── Proactive share refresh task (Issue #242) ───────────────────────────
+    private_table::spawn_share_refresh_task(state.tables.clone(), peer_http_endpoints, node_id);
+
+    // ── Background metric updaters ────────────────────────────────────────────
+    {
+        let metrics = state.metrics.clone();
+        tokio::spawn(async move {
+            let mut sys = sysinfo::System::new();
+            loop {
+                sys.refresh_memory();
+                sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                if let Some(process) = sys.process(sysinfo::get_current_pid().unwrap()) {
+                    metrics.memory_bytes.set(process.memory() as f64 * 1024.0);
+                }
+                metrics.memory_limit_bytes.set(
+                    std::env::var("MPC_NODE_MEMORY_LIMIT_BYTES")
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(2.0 * 1024.0 * 1024.0 * 1024.0), // default 2GiB
+                );
+                metrics.node_up.set(1.0);
+                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+            }
+        });
+    }
+
+    // ── Certificate expiry metric ─────────────────────────────────────────────
+    {
+        let metrics = state.metrics.clone();
+        tokio::spawn(async move {
+            loop {
+                let expiry = std::env::var("MPC_NODE_CERT_EXPIRY_TIMESTAMP")
+                    .ok()
+                    .and_then(|ts| ts.parse::<i64>().ok())
+                    .map(|ts| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        (ts - now) as f64 / 86400.0
+                    })
+                    .unwrap_or(365.0);
+                metrics
+                    .cert_expiry_days
+                    .with_label_values(&["server"])
+                    .set(expiry);
+                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -158,6 +266,10 @@ async fn main() {
         .route("/session/:id/generate", post(api::post_generate))
         .route("/session/:id/status", get(api::get_status))
         .route("/session/:id/proof", get(api::get_proof))
+        .route(
+            "/session/:id/profile",
+            post(api::post_enable_profiling).get(api::get_profile),
+        )
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
@@ -230,11 +342,7 @@ async fn serve_tls(
                 Err(e) => {
                     // TLS handshake failures are expected when misconfigured
                     // clients connect; log at debug level to avoid noise.
-                    tracing::debug!(
-                        "TLS handshake failed from {}: {}",
-                        remote_addr,
-                        e
-                    );
+                    tracing::debug!("TLS handshake failed from {}: {}", remote_addr, e);
                     return;
                 }
             };
@@ -249,11 +357,7 @@ async fn serve_tls(
                 .serve_connection(io, svc)
                 .await
             {
-                tracing::debug!(
-                    "HTTP/TLS connection error from {}: {}",
-                    remote_addr,
-                    e
-                );
+                tracing::debug!("HTTP/TLS connection error from {}: {}", remote_addr, e);
             }
         });
     }

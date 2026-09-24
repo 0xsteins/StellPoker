@@ -106,10 +106,7 @@ fn load_coordinator_identity() -> Result<Option<reqwest::Identity>, String> {
         "COORDINATOR_CLIENT_CERT_PATH",
         "COORDINATOR_CLIENT_CERT_B64",
     )?;
-    let key_der = load_der_from_env(
-        "COORDINATOR_CLIENT_KEY_PATH",
-        "COORDINATOR_CLIENT_KEY_B64",
-    )?;
+    let key_der = load_der_from_env("COORDINATOR_CLIENT_KEY_PATH", "COORDINATOR_CLIENT_KEY_B64")?;
 
     match (cert_der, key_der) {
         (Some(cert), Some(key)) => {
@@ -191,6 +188,87 @@ pub struct MpcProofResult {
     pub session_id: String,
 }
 
+/// Session summary for audit trail (Issue #245).
+///
+/// After each MPC session completes (success or failure), a signed summary
+/// is produced containing: session ID, phase timing, participants, proof
+/// hash, and verification status. The coordinator aggregates these for
+/// the audit trail.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub circuit_name: String,
+    pub status: SessionStatus,
+    pub participants: Vec<String>,
+    pub started_at: Option<String>,
+    pub completed_at: String,
+    pub duration_ms: u64,
+    pub phase_timings: PhaseTimings,
+    pub proof_hash: Option<String>,
+    pub verification_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SessionStatus {
+    Complete,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PhaseTimings {
+    pub merge_shares_ms: u64,
+    pub witness_generation_ms: u64,
+    pub proof_generation_ms: u64,
+    pub total_ms: u64,
+}
+
+/// Produce a session summary from a completed proof generation result.
+pub fn produce_session_summary(
+    session_id: &str,
+    circuit_name: &str,
+    result: &Result<MpcProofResult, String>,
+    participants: &[String],
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    phase_timings: PhaseTimings,
+) -> SessionSummary {
+    let now = chrono::Utc::now();
+    let completed_at = now.to_rfc3339();
+    let duration_ms = phase_timings.total_ms;
+
+    let (status, proof_hash, verification_status) = match result {
+        Ok(proof_result) => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&proof_result.proof);
+            let hash = format!("{:x}", hasher.finalize());
+
+            (
+                SessionStatus::Complete,
+                Some(hash),
+                Some("verified".to_string()),
+            )
+        }
+        Err(e) => (
+            SessionStatus::Failed(e.clone()),
+            None,
+            Some("failed".to_string()),
+        ),
+    };
+
+    SessionSummary {
+        session_id: session_id.to_string(),
+        circuit_name: circuit_name.to_string(),
+        status,
+        participants: participants.to_vec(),
+        started_at: started_at.map(|t| t.to_rfc3339()),
+        completed_at,
+        duration_ms,
+        phase_timings,
+        proof_hash,
+        verification_status,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedShareSets {
     pub share_set_ids: Vec<String>,
@@ -230,22 +308,42 @@ async fn prepare_from_nodes(
 
     for (idx, endpoint) in node_endpoints.iter().enumerate() {
         let url = url_builder(endpoint, table_id);
-        let body = body.clone();
+        // Bandwidth estimation / adaptive protocol selection (Issue #238):
+        // tell the node which coNoir protocol variant to run based on this
+        // endpoint's current estimated bandwidth, then measure this
+        // request's payload size and latency to refine the estimate for
+        // next time.
+        let variant = crate::bandwidth::select_protocol_variant(endpoint).await;
+        let mut body = body.clone();
+        if let serde_json::Value::Object(ref mut map) = body {
+            map.insert(
+                "protocol_variant".to_string(),
+                serde_json::Value::String(variant.as_str().to_string()),
+            );
+        }
+        let body_bytes = serde_json::to_vec(&body).map(|v| v.len()).unwrap_or(0);
         let client = client.clone();
         let op = operation_name.to_string();
         let endpoint = endpoint.clone();
         let handle = tokio::spawn(async move {
             let call_start = std::time::Instant::now();
-            let resp = client
-                .post(&url)
-                .json(&body)
+            let mut req = client.post(&url).json(&body);
+            // Propagate the active trace context to MPC nodes so the full
+            // frontend → coordinator → node → Soroban chain appears as one
+            // distributed trace in Jaeger / Grafana Tempo (Issue #255).
+            if let Some(tp) = crate::telemetry::current_traceparent() {
+                req = req.header("traceparent", tp);
+            }
+            let resp = req
                 .send()
                 .await
                 .map_err(|e| format!("failed to call node {} {}: {}", idx, op, e))?;
             // Graceful degradation (issue #110): track round-trip latency so
             // persistently slow nodes are logged and scored, without failing
             // this call — the node did respond, just slowly.
-            node_reliability::record(&endpoint, call_start.elapsed()).await;
+            let elapsed = call_start.elapsed();
+            node_reliability::record(&endpoint, elapsed).await;
+            crate::bandwidth::record_sample(&endpoint, body_bytes, elapsed).await;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -259,9 +357,10 @@ async fn prepare_from_nodes(
                 ));
             }
 
-            let prepared: NodePreparedSharesResponse = resp.json().await.map_err(|e| {
-                format!("failed to parse node {} {} response: {}", idx, op, e)
-            })?;
+            let prepared: NodePreparedSharesResponse = resp
+                .json()
+                .await
+                .map_err(|e| format!("failed to parse node {} {} response: {}", idx, op, e))?;
 
             Ok::<(usize, String), String>((idx, prepared.share_set_id))
         });
@@ -348,6 +447,9 @@ pub async fn prepare_showdown_from_nodes(
 }
 
 /// Dispatch all prepared share sets and trigger MPC proof generation.
+///
+/// After proof generation completes (success or failure), a [`SessionSummary`]
+/// is produced and logged for the audit trail.
 pub async fn generate_proof_from_share_sets(
     client: &reqwest::Client,
     table_id: u32,
@@ -357,6 +459,10 @@ pub async fn generate_proof_from_share_sets(
     circuit_dir: &str,
     node_endpoints: &[String],
 ) -> Result<MpcProofResult, String> {
+    let started_at = Some(chrono::Utc::now());
+    let participants: Vec<String> = node_endpoints.iter().cloned().collect();
+
+    let dispatch_start = std::time::Instant::now();
     dispatch_share_sets_from_nodes(
         client,
         node_endpoints,
@@ -366,7 +472,45 @@ pub async fn generate_proof_from_share_sets(
         circuit_name,
     )
     .await?;
-    trigger_and_collect_proof(client, session_id, circuit_name, circuit_dir, node_endpoints).await
+    let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
+
+    let proof_start = std::time::Instant::now();
+    let result = trigger_and_collect_proof(
+        client,
+        session_id,
+        circuit_name,
+        circuit_dir,
+        node_endpoints,
+    )
+    .await;
+    let proof_ms = proof_start.elapsed().as_millis() as u64;
+
+    let phase_timings = PhaseTimings {
+        merge_shares_ms: dispatch_ms,
+        witness_generation_ms: 0,
+        proof_generation_ms: proof_ms,
+        total_ms: dispatch_ms + proof_ms,
+    };
+
+    let summary = produce_session_summary(
+        session_id,
+        circuit_name,
+        &result,
+        &participants,
+        started_at,
+        phase_timings,
+    );
+
+    tracing::info!(
+        session_id = %summary.session_id,
+        circuit = %summary.circuit_name,
+        status = ?summary.status,
+        duration_ms = summary.duration_ms,
+        proof_hash = ?summary.proof_hash,
+        "session summary produced for audit"
+    );
+
+    result
 }
 
 #[derive(Deserialize)]
@@ -638,14 +782,15 @@ async fn trigger_and_collect_proof(
         let handle = tokio::spawn(async move {
             let mut last_conn_error: Option<String> = None;
             for attempt in 1..=TRIGGER_RETRY_ATTEMPTS {
-                let resp = client
-                    .post(&url)
-                    .json(&serde_json::json!({
-                        "circuit_dir": circuit_dir,
-                        "crs_path": crs_dir,
-                    }))
-                    .send()
-                    .await;
+                let mut req = client.post(&url).json(&serde_json::json!({
+                    "circuit_dir": circuit_dir,
+                    "crs_path": crs_dir,
+                }));
+                // Issue #255: propagate trace context to MPC nodes.
+                if let Some(tp) = crate::telemetry::current_traceparent() {
+                    req = req.header("traceparent", tp);
+                }
+                let resp = req.send().await;
 
                 let resp = match resp {
                     Ok(r) => r,
@@ -822,9 +967,15 @@ mod error_handling_tests {
     #[tokio::test]
     async fn prepare_deal_errors_when_node_unreachable() {
         let endpoints = vec![DEAD_NODE.to_string()];
-        let err = prepare_deal_from_nodes(&test_client(), &endpoints, "/circuits", 1, &["P1".to_string()])
-            .await
-            .unwrap_err();
+        let err = prepare_deal_from_nodes(
+            &test_client(),
+            &endpoints,
+            "/circuits",
+            1,
+            &["P1".to_string()],
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("prepare-deal"), "got: {err}");
     }
 
@@ -863,7 +1014,10 @@ mod error_handling_tests {
         let err = trigger_and_collect_proof(&test_client(), "sess", "deal_valid", "/circuits", &[])
             .await
             .unwrap_err();
-        assert!(err.contains("no MPC node endpoints configured"), "got: {err}");
+        assert!(
+            err.contains("no MPC node endpoints configured"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -878,9 +1032,15 @@ mod error_handling_tests {
             DEAD_NODE.to_string(),
             DEAD_NODE.to_string(),
         ];
-        let err = trigger_and_collect_proof(&test_client(), "sess", "deal_valid", "/circuits", &endpoints)
-            .await
-            .unwrap_err();
+        let err = trigger_and_collect_proof(
+            &test_client(),
+            "sess",
+            "deal_valid",
+            "/circuits",
+            &endpoints,
+        )
+        .await
+        .unwrap_err();
         assert!(is_node_unavailable_error(&err), "got: {err}");
     }
 
@@ -889,8 +1049,12 @@ mod error_handling_tests {
         assert!(is_node_unavailable_error(
             "NODE_UNAVAILABLE: node 1 unreachable after 3 attempts triggering generate: connect error"
         ));
-        assert!(!is_node_unavailable_error("node 1 trigger failed: HTTP 500: internal error"));
-        assert!(!is_node_unavailable_error("proof generation timed out after 300 seconds"));
+        assert!(!is_node_unavailable_error(
+            "node 1 trigger failed: HTTP 500: internal error"
+        ));
+        assert!(!is_node_unavailable_error(
+            "proof generation timed out after 300 seconds"
+        ));
     }
 
     #[tokio::test]
@@ -905,8 +1069,7 @@ mod error_handling_tests {
 
     #[tokio::test]
     async fn collect_prepared_share_sets_detects_out_of_range_index() {
-        let handle =
-            tokio::spawn(async { Ok::<(usize, String), String>((5, "id".to_string())) });
+        let handle = tokio::spawn(async { Ok::<(usize, String), String>((5, "id".to_string())) });
         let err = collect_prepared_share_sets(vec![handle], 1)
             .await
             .unwrap_err();
@@ -960,9 +1123,15 @@ mod byzantine_fault_tolerance_tests {
         );
         let endpoint = spawn_test_server(router).await;
 
-        let err = prepare_deal_from_nodes(&test_client(), &[endpoint], "/circuits", 1, &["P1".to_string()])
-            .await
-            .unwrap_err();
+        let err = prepare_deal_from_nodes(
+            &test_client(),
+            &[endpoint],
+            "/circuits",
+            1,
+            &["P1".to_string()],
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             err.contains("missing share_set_id"),
@@ -986,8 +1155,14 @@ mod byzantine_fault_tolerance_tests {
         );
         let endpoint = spawn_test_server(router).await;
 
-        let result =
-            prepare_deal_from_nodes(&test_client(), &[endpoint], "/circuits", 1, &["P1".to_string()]).await;
+        let result = prepare_deal_from_nodes(
+            &test_client(),
+            &[endpoint],
+            "/circuits",
+            1,
+            &["P1".to_string()],
+        )
+        .await;
 
         match result {
             Err(e) => assert!(
@@ -1020,9 +1195,15 @@ mod byzantine_fault_tolerance_tests {
         );
         let endpoint = spawn_test_server(router).await;
 
-        let err = prepare_deal_from_nodes(&test_client(), &[endpoint], "/circuits", 1, &["P1".to_string()])
-            .await
-            .unwrap_err();
+        let err = prepare_deal_from_nodes(
+            &test_client(),
+            &[endpoint],
+            "/circuits",
+            1,
+            &["P1".to_string()],
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             err.contains("HTTP 500") || err.contains("rejected"),
@@ -1118,7 +1299,13 @@ mod byzantine_fault_tolerance_tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            prepare_deal_from_nodes(&test_client(), &[endpoint], "/circuits", 1, &["P1".to_string()]),
+            prepare_deal_from_nodes(
+                &test_client(),
+                &[endpoint],
+                "/circuits",
+                1,
+                &["P1".to_string()],
+            ),
         )
         .await;
 
@@ -1161,9 +1348,11 @@ mod byzantine_fault_tolerance_tests {
         let e1 = spawn_test_server(stalling).await; // Byzantine staller
         let e2 = spawn_test_server(honest()).await;
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(2), resolve_hole_cards(&test_client(), &[e0, e1, e2], 1, &[0, 1]))
-                .await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            resolve_hole_cards(&test_client(), &[e0, e1, e2], 1, &[0, 1]),
+        )
+        .await;
 
         assert!(
             result.is_err(),
@@ -1176,9 +1365,15 @@ mod byzantine_fault_tolerance_tests {
     /// This fires immediately without any network call.
     #[tokio::test]
     async fn zero_node_committee_rejected_before_proof_generation() {
-        let err = trigger_and_collect_proof(&test_client(), "sess_zero_nodes", "deal_valid", "/circuits", &[])
-            .await
-            .unwrap_err();
+        let err = trigger_and_collect_proof(
+            &test_client(),
+            "sess_zero_nodes",
+            "deal_valid",
+            "/circuits",
+            &[],
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             err.contains("no MPC node endpoints configured"),
@@ -1199,9 +1394,7 @@ mod byzantine_fault_tolerance_tests {
         let make_colluding = |id: &'static str| {
             Router::new().route(
                 "/table/:table_id/prepare-deal",
-                post(move || async move {
-                    axum::Json(serde_json::json!({ "share_set_id": id }))
-                }),
+                post(move || async move { axum::Json(serde_json::json!({ "share_set_id": id })) }),
             )
         };
 

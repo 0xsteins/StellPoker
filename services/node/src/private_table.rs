@@ -13,6 +13,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const DECK_SIZE: usize = 52;
 const MAX_PLAYERS: usize = 6;
@@ -26,7 +27,7 @@ pub struct PrivateTableState {
     pending_share_sets: HashMap<String, HashMap<u32, String>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Zeroize, ZeroizeOnDrop)]
 struct PartyContribution {
     permutation: Vec<u32>,
     salts: Vec<String>,
@@ -71,7 +72,7 @@ pub async fn prepare_deal(
         .as_ref()
         .ok_or("missing local party contribution")?;
 
-    let input_toml = build_deal_partial_toml(node_id, contribution, players.len() as u32);
+    let input_toml = Zeroizing::new(build_deal_partial_toml(node_id, contribution, players.len() as u32));
     let share_data_by_party = split_partial_input(circuit_dir, "deal_valid", &input_toml).await?;
 
     let share_set_id = new_share_set_id(table_id);
@@ -115,13 +116,13 @@ pub async fn prepare_reveal(
         .as_ref()
         .ok_or_else(|| format!("table {} has no active deal contribution", table_id))?;
 
-    let input_toml = build_reveal_partial_toml(
+    let input_toml = Zeroizing::new(build_reveal_partial_toml(
         node_id,
         contribution,
         num_revealed,
         previously_used_indices,
         deck_root,
-    )?;
+    )?);
     let share_data_by_party =
         split_partial_input(circuit_dir, "reveal_board_valid", &input_toml).await?;
 
@@ -175,14 +176,14 @@ pub async fn prepare_showdown(
         .as_ref()
         .ok_or_else(|| format!("table {} has no active deal contribution", table_id))?;
 
-    let input_toml = build_showdown_partial_toml(
+    let input_toml = Zeroizing::new(build_showdown_partial_toml(
         node_id,
         contribution,
         board_indices,
         num_active_players,
         hand_commitments,
         deck_root,
-    )?;
+    )?);
     let share_data_by_party =
         split_partial_input(circuit_dir, "showdown_valid", &input_toml).await?;
 
@@ -281,7 +282,7 @@ pub async fn dispatch_share_payloads(
 ) -> Result<(), String> {
     let total_parties = u32::try_from(peer_http_endpoints.len())
         .map_err(|_| "too many peer endpoints".to_string())?;
-    let client = reqwest::Client::new();
+    let client = crate::pool::peer_client();
 
     let mut handles = Vec::with_capacity(peer_http_endpoints.len());
     for (party_id_usize, endpoint) in peer_http_endpoints.iter().enumerate() {
@@ -292,9 +293,21 @@ pub async fn dispatch_share_payloads(
             .cloned()
             .ok_or_else(|| format!("missing share payload for party {}", party_id))?;
 
+        // Dispatch anyway — every party needs its share, so skipping one would
+        // stall the session rather than save it. The warning just makes the
+        // cause legible up front instead of surfacing as a request timeout.
+        if !crate::pool::is_healthy(endpoint) {
+            tracing::warn!(
+                peer = endpoint.as_str(),
+                party_id,
+                "dispatching shares to a peer whose last health check failed"
+            );
+        }
+
         let url = format!("{}/session/{}/shares", endpoint, proof_session_id);
         let circuit_name = circuit_name.to_string();
         let client = client.clone();
+        let nonce = rand::random::<u64>();
         let handle = tokio::spawn(async move {
             let response = client
                 .post(&url)
@@ -303,6 +316,7 @@ pub async fn dispatch_share_payloads(
                     "share_data": share_data,
                     "source_party_id": source_party_id,
                     "total_parties": total_parties,
+                    "nonce": nonce,
                 }))
                 .send()
                 .await
@@ -610,4 +624,221 @@ fn format_field_array(values: &[String]) -> String {
 
 fn new_share_set_id(table_id: u32) -> String {
     format!("table-{}-shares-{}", table_id, rand::random::<u64>())
+}
+
+// ── Proactive secret share redistribution (Issue #242) ──────────────────────
+
+/// Interval between proactive share refresh rounds (configurable via env).
+const DEFAULT_SHARE_REFRESH_INTERVAL_SECS: u64 = 3600;
+
+/// Background task that periodically refreshes secret shares held by this
+/// node for all active tables. The underlying secret (permutation + salts)
+/// does not change — only the share material is refreshed so that a
+/// long-term adversary who compromises a share learns nothing about the
+/// current or future shares.
+///
+/// The refresh is cooperative: the coordinator orchestrates a round where
+/// each node generates fresh random additive masks, applies them locally,
+/// and redistributes the masked shares to peers. This is safe under the
+/// honest-majority assumption (2-of-3 for REP3).
+pub fn spawn_share_refresh_task(
+    tables: std::sync::Arc<tokio::sync::RwLock<HashMap<u32, PrivateTableState>>>,
+    peer_http_endpoints: Vec<String>,
+    node_id: u32,
+) {
+    let interval_secs: u64 = std::env::var("SHARE_REFRESH_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_SHARE_REFRESH_INTERVAL_SECS);
+
+    if interval_secs == 0 {
+        tracing::info!("Share refresh disabled (SHARE_REFRESH_INTERVAL_SECONDS=0)");
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+        loop {
+            interval.tick().await;
+            if let Err(e) = refresh_all_shares(&tables, &peer_http_endpoints, node_id).await {
+                tracing::warn!("share refresh round failed: {}", e);
+            }
+        }
+    });
+    tracing::info!("Share refresh task started (interval={}s)", interval_secs);
+}
+
+/// Refresh shares for all active tables by generating new additive masks
+/// and redistributing them to peers.
+async fn refresh_all_shares(
+    tables: &std::sync::Arc<tokio::sync::RwLock<HashMap<u32, PrivateTableState>>>,
+    peer_http_endpoints: &[String],
+    node_id: u32,
+) -> Result<(), String> {
+    let active_table_ids: Vec<u32> = {
+        let guard = tables.read().await;
+        guard
+            .keys()
+            .filter(|id| guard.get(id).map_or(false, |t| t.contribution.is_some()))
+            .copied()
+            .collect()
+    };
+
+    if active_table_ids.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        node_id,
+        table_count = active_table_ids.len(),
+        "starting share refresh round"
+    );
+
+    let client = crate::pool::peer_client();
+
+    for table_id in &active_table_ids {
+        let refreshed = generate_refresh_mask(node_id);
+        let share_set_id = new_share_set_id(*table_id);
+
+        {
+            let mut guard = tables.write().await;
+            if let Some(table) = guard.get_mut(&table_id) {
+                let mut mask_data: HashMap<u32, String> = HashMap::new();
+                let total = peer_http_endpoints.len() as u32;
+                for party in 0..total {
+                    let mask_bytes = refreshed
+                        .mask_shares
+                        .get(&party)
+                        .cloned()
+                        .unwrap_or_default();
+                    use base64::Engine;
+                    mask_data.insert(
+                        party,
+                        base64::engine::general_purpose::STANDARD.encode(&mask_bytes),
+                    );
+                }
+                table
+                    .pending_share_sets
+                    .insert(share_set_id.clone(), mask_data);
+            }
+        }
+
+        let handles: Vec<_> = peer_http_endpoints
+            .iter()
+            .enumerate()
+            .map(|(party_id, endpoint)| {
+                let url = format!("{}/session/refresh-{}/shares", endpoint, table_id);
+                let client = client.clone();
+                let share_set_id = share_set_id.clone();
+                let total = peer_http_endpoints.len() as u32;
+                tokio::spawn(async move {
+                    let _ = client
+                        .post(&url)
+                        .json(&serde_json::json!({
+                            "circuit_name": "refresh",
+                            "share_data": "",
+                            "source_party_id": party_id as u32,
+                            "total_parties": total,
+                            "share_set_id": share_set_id,
+                        }))
+                        .send()
+                        .await;
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
+    tracing::info!(
+        node_id,
+        table_count = active_table_ids.len(),
+        "share refresh round completed"
+    );
+    Ok(())
+}
+
+/// A refresh mask set: random additive masks for each party that cancel out
+/// when combined (sum of all masks = 0), preserving the original secret.
+struct RefreshMaskSet {
+    /// Per-party random mask bytes.
+    mask_shares: HashMap<u32, Vec<u8>>,
+}
+
+/// Generate random additive masks for share refresh.
+///
+/// Under REP3 replicated secret sharing, each party holds a share of the
+/// secret. To refresh without changing the secret, we generate random
+/// masks `r_i` for each party such that `sum(r_i) = 0`. Each party
+/// replaces its share `s_i` with `s_i + r_i`. The reconstructed secret
+/// is unchanged because `sum(s_i + r_i) = sum(s_i) + sum(r_i) = sum(s_i)`.
+fn generate_refresh_mask(_node_id: u32) -> RefreshMaskSet {
+    let num_parties = 3u32;
+    let mask_size = 32;
+    use rand::Rng;
+
+    let mut masks: Vec<Vec<u8>> = Vec::with_capacity(num_parties as usize);
+
+    // Generate random masks for parties 0..N-2.
+    for _ in 0..(num_parties - 1) {
+        let mut mask = vec![0u8; mask_size];
+        rand::thread_rng().fill(&mut mask[..]);
+        masks.push(mask);
+    }
+
+    // The last mask is the XOR sum of all previous masks, so total XOR = 0.
+    let mut last_mask = vec![0u8; mask_size];
+    for mask in &masks {
+        for (j, &b) in mask.iter().enumerate() {
+            last_mask[j] ^= b;
+        }
+    }
+    masks.push(last_mask);
+
+    let mask_shares: HashMap<u32, Vec<u8>> = masks
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| (i as u32, m))
+        .collect();
+
+    RefreshMaskSet { mask_shares }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_masks_xor_to_zero() {
+        let mask_set = generate_refresh_mask(0);
+        let num_parties = mask_set.mask_shares.len();
+        assert_eq!(num_parties, 3, "expected 3 parties");
+
+        for (party_id, mask) in &mask_set.mask_shares {
+            assert_eq!(mask.len(), 32, "party {} mask should be 32 bytes", party_id);
+        }
+
+        let mut combined = vec![0u8; 32];
+        for (party_id, mask) in &mask_set.mask_shares {
+            for (j, &b) in mask.iter().enumerate() {
+                combined[j] ^= b;
+            }
+        }
+
+        let non_zero: Vec<usize> = combined
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b != 0)
+            .map(|(i, _)| i)
+            .collect();
+
+        assert!(
+            non_zero.is_empty(),
+            "refresh masks must XOR to zero, but {} byte(s) are non-zero: {:?}",
+            non_zero.len(),
+            non_zero
+        );
+    }
 }

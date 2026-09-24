@@ -44,6 +44,9 @@ mod anti_dumping;
 mod api_version;
 mod archiver;
 mod audit_log;
+mod bandwidth;
+mod circuit_pins;
+mod committee_scaling;
 mod cors_db;
 pub mod crypto;
 mod dashboard;
@@ -52,15 +55,21 @@ mod discovery;
 mod feature_flags;
 mod hot_reload;
 mod idempotency;
+mod job_queue;
 mod key_rotation;
 mod leader_election;
 mod mpc;
 mod mpc_auth_middleware;
 mod mpc_benchmark;
 mod mpc_heartbeat;
+mod mpc_identity;
+mod mpc_node_benchmark;
+mod mpc_partition;
+mod mpc_version;
 mod node_reliability;
 mod plugin;
 mod proof_cache;
+mod rate_limit;
 mod rate_limit_db;
 mod redact;
 #[path = "middleware.rs"]
@@ -69,9 +78,13 @@ mod session_cache;
 mod session_gc;
 mod session_isolation;
 mod session_migration;
+mod session_recovery;
 mod soroban;
+mod spectators;
 mod stats;
+mod telemetry;
 mod tls_client;
+mod tournament;
 
 use api::admin::{AdminConfig, AdminState};
 
@@ -151,6 +164,7 @@ struct HealthResponse {
         api::request_reveal,
         api::request_showdown,
         api::player_action,
+        api::transfer_chips,
         api::rit_opt_in,
         api::get_player_cards,
         api::get_table_state,
@@ -220,6 +234,8 @@ struct HealthResponse {
         api::types::WalletVerifyResponse,
         api::types::RitOptInRequest,
         api::types::RitOptInResponse,
+        api::types::TransferChipsRequest,
+        api::types::TransferChipsResponse,
         api::types::MpcNodeProgress,
         api::types::TableMpcStatusResponse,
     )),
@@ -275,11 +291,17 @@ struct AppState {
     admin_config: Arc<RwLock<api::admin::AdminConfig>>,
     admin_state: api::admin::AdminState,
     rate_limit_state: Arc<RwLock<RateLimitState>>,
+    /// Per-IP sliding-window buckets for the global rate-limit middleware (Issue #25).
+    ip_buckets: rate_limit::IpBucketStore,
+    /// Counter of 429 responses; watched by the sustained-rate alert task (Issue #25).
+    rejection_counter: rate_limit::RejectionCounter,
     metrics: MetricsState,
     chat_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
     /// Per-table broadcast channels for `/api/table/:table_id/state/ws`
     /// (Issue #105 — real-time game state push).
     game_state_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
+    /// Live anonymous spectator counts per table (Issue #171).
+    spectators: spectators::SpectatorRegistry,
     mpc_sessions: session_gc::SessionStore,
     stats: stats::StatsStore,
     feature_flags: feature_flags::FeatureFlagStore,
@@ -318,10 +340,26 @@ struct AppState {
     /// cross-session read/write/subscribe attempt that was denied so operators
     /// can prove sessions A and B cannot observe each other.
     isolation_audit: Arc<std::sync::Mutex<session_isolation::IsolationAudit>>,
+    /// Async job queue for MPC session orchestration.
+    /// Replaces synchronous in-request MPC handling with retry, priority,
+    /// cancellation, and progress tracking.
+    pub job_queue: Arc<job_queue::JobQueue>,
+    /// Per-node protocol/circuit version handshake registry (Issue #233).
+    version_registry: mpc_version::VersionRegistry,
+    /// Per-node resource/throughput benchmark samples (Issue #234).
+    node_benchmark_store: mpc_node_benchmark::NodeBenchmarkStore,
+    /// Consensus-based network partition detector for the MPC cluster (Issue #236).
+    partition_store: mpc_partition::PartitionStore,
+    /// Committee registry mapping MPC node id -> trusted Stellar address,
+    /// used to verify node identity and signed session messages (Issue #237).
+    committee_registry: mpc_identity::CommitteeRegistry,
+    /// Replay protection tracker for MPC session messages (Issue #500).
+    mpc_nonce_tracker: mpc_identity::SessionNonceTracker,
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
+#[derive(Clone)]
 struct MpcConfig {
     /// Endpoints of the 3 MPC nodes
     node_endpoints: Vec<String>,
@@ -387,6 +425,10 @@ struct TableSession {
     /// Timestamp when the current MPC operation started (epoch secs).
     #[serde(default)]
     mpc_operation_started: Option<u64>,
+    /// Circuit artifact hashes pinned at session start (circuit_name → sha256_hex).
+    /// Every proof submission verifies these to prevent mid-session artifact changes.
+    #[serde(default)]
+    pinned_artifact_hashes: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -416,6 +458,10 @@ async fn main() {
             .with_writer(redact::RedactingMakeWriter::new(std::io::stdout))
             .init();
     }
+    // Initialise tracing + optional OpenTelemetry OTLP pipeline.
+    // The guard must stay alive for the duration of the process — dropping it
+    // flushes all pending spans to the exporter.
+    let _otel_guard = telemetry::init_tracer();
 
     let enc_key =
         crypto::EncryptionKey::from_env().unwrap_or_else(|_| crypto::EncryptionKey::ephemeral());
@@ -701,6 +747,24 @@ async fn main() {
         )))
     };
 
+    let version_registry = mpc_version::new_registry();
+    let node_benchmark_store = mpc_node_benchmark::new_store();
+    let partition_store = mpc_partition::new_store(mpc_partition::PartitionConfig::from_env());
+    let committee_registry = mpc_identity::new_registry();
+    // Seed committee identities from the static MPC_NODE_<n>_ADDRESS env vars,
+    // when present, mirroring how MPC_NODE_<n> endpoints are configured.
+    {
+        let mut seeded = Vec::new();
+        for i in 0..8u32 {
+            if let Ok(address) = std::env::var(format!("MPC_NODE_{}_ADDRESS", i)) {
+                seeded.push((i.to_string(), address));
+            }
+        }
+        if !seeded.is_empty() {
+            mpc_identity::seed_registry(&committee_registry, &seeded).await;
+        }
+    }
+
     let state = AppState {
         tables: Arc::clone(&tables),
         lobby_assignments: Arc::clone(&lobby_assignments),
@@ -710,9 +774,12 @@ async fn main() {
         admin_config: Arc::new(RwLock::new(admin_config)),
         admin_state,
         rate_limit_state: Arc::new(RwLock::new(RateLimitState::default())),
+        ip_buckets: rate_limit::new_ip_bucket_store(),
+        rejection_counter: rate_limit::new_rejection_counter(),
         metrics: metrics.clone(),
         chat_channels: Arc::new(Mutex::new(HashMap::new())),
         game_state_channels: Arc::new(Mutex::new(HashMap::new())),
+        spectators: spectators::SpectatorRegistry::new(),
         mpc_sessions,
         stats: stats_store,
         feature_flags: feature_flag_store,
@@ -734,12 +801,130 @@ async fn main() {
         isolation_audit: Arc::new(std::sync::Mutex::new(
             session_isolation::IsolationAudit::default(),
         )),
+        job_queue: Arc::new(job_queue::JobQueue::new(
+            std::env::var("MPC_JOB_QUEUE_WORKERS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(4),
+        )),
+        version_registry,
+        node_benchmark_store,
+        partition_store,
+        committee_registry,
+        mpc_nonce_tracker: mpc_identity::SessionNonceTracker::new(),
     };
     idempotency::spawn_gc_task(state.idempotency_store.clone());
+    rate_limit::spawn_rate_alert_task(state.rejection_counter.clone());
+    rate_limit::spawn_bucket_gc_task(state.ip_buckets.clone());
     key_rotation::spawn_rotation_task(
         state.committee_key_rotation.clone(),
         state.soroban_config.clone(),
     );
+    // Register job queue handlers.
+    let jq = Arc::clone(&state.job_queue);
+    let mpc_client_jq = state.mpc_client.clone();
+    let mpc_config_jq = state.mpc_config.clone();
+    jq.register_handler(
+        "mpc_deal",
+        Arc::new(move |job| {
+            let client = mpc_client_jq.clone();
+            let cfg = mpc_config_jq.clone();
+            tokio::spawn(async move {
+                let table_id = job.table_id;
+                let players: Vec<String> =
+                    serde_json::from_value(job.payload.get("players").cloned().unwrap_or_default())
+                        .unwrap_or_default();
+                let prepared = mpc::prepare_deal_from_nodes(
+                    &client,
+                    &cfg.node_endpoints,
+                    &cfg.circuit_dir,
+                    table_id,
+                    &players,
+                )
+                .await
+                .map_err(|e| format!("deal prepare failed: {}", e))?;
+                let session_id = job.job_id.replace("job-mpc_deal-", "proof-");
+                let deal_circuit = if players.len() >= 2 && players.len() < 6 {
+                    format!("deal_valid_{}p", players.len())
+                } else {
+                    "deal_valid".to_string()
+                };
+                let proof = mpc::generate_proof_from_share_sets(
+                    &client,
+                    table_id,
+                    &prepared.share_set_ids,
+                    &session_id,
+                    &deal_circuit,
+                    &cfg.circuit_dir,
+                    &cfg.node_endpoints,
+                )
+                .await
+                .map_err(|e| format!("deal proof generation failed: {}", e))?;
+                Ok(serde_json::json!({
+                    "proof": proof.proof,
+                    "public_inputs": proof.public_inputs,
+                    "session_id": proof.session_id,
+                }))
+            })
+        }),
+    );
+    let jq2 = Arc::clone(&state.job_queue);
+    let mpc_client_jq2 = state.mpc_client.clone();
+    let mpc_config_jq2 = state.mpc_config.clone();
+    jq2.register_handler(
+        "mpc_reveal",
+        Arc::new(move |job| {
+            let client = mpc_client_jq2.clone();
+            let cfg = mpc_config_jq2.clone();
+            tokio::spawn(async move {
+                let table_id = job.table_id;
+                let phase: String =
+                    serde_json::from_value(job.payload.get("phase").cloned().unwrap_or_default())
+                        .unwrap_or_default();
+                let dealt_indices: Vec<u32> = serde_json::from_value(
+                    job.payload
+                        .get("dealt_indices")
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+                .unwrap_or_default();
+                let deck_root: String = serde_json::from_value(
+                    job.payload.get("deck_root").cloned().unwrap_or_default(),
+                )
+                .unwrap_or_default();
+                let prepared = mpc::prepare_reveal_from_nodes(
+                    &client,
+                    &cfg.node_endpoints,
+                    &cfg.circuit_dir,
+                    table_id,
+                    &phase,
+                    &dealt_indices,
+                    &deck_root,
+                )
+                .await
+                .map_err(|e| format!("reveal prepare failed: {}", e))?;
+                let session_id = job.job_id.replace("job-mpc_reveal-", "proof-");
+                let proof = mpc::generate_proof_from_share_sets(
+                    &client,
+                    table_id,
+                    &prepared.share_set_ids,
+                    &session_id,
+                    "reveal_board_valid",
+                    &cfg.circuit_dir,
+                    &cfg.node_endpoints,
+                )
+                .await
+                .map_err(|e| format!("reveal proof generation failed: {}", e))?;
+                Ok(serde_json::json!({
+                    "proof": proof.proof,
+                    "public_inputs": proof.public_inputs,
+                    "session_id": proof.session_id,
+                }))
+            })
+        }),
+    );
+    state.job_queue.spawn_workers();
+    circuit_pins::spawn_circuit_watcher(state.mpc_config.circuit_dir.clone());
 
     if let Some(path) = hot_reload_snapshot {
         hot_reload::spawn_snapshot_task(path, Arc::clone(&tables), Arc::clone(&lobby_assignments));
@@ -825,6 +1010,21 @@ async fn main() {
         .route("/api/node/register", post(api::register_node))
         .route("/api/node/:id/heartbeat", post(api::node_heartbeat))
         .route("/api/node/:id", delete(api::deregister_node))
+        // MPC node version negotiation (Issue #233)
+        .route("/api/mpc/version/register", post(register_node_version))
+        .route("/api/mpc/version/nodes", get(list_node_versions))
+        .route("/api/mpc/version/negotiate", get(negotiate_version))
+        // MPC node benchmarking suite (Issue #234)
+        .route("/api/mpc/benchmark/sample", post(record_node_benchmark))
+        .route("/api/mpc/benchmark/report", get(get_node_benchmark_report))
+        .route("/api/mpc/benchmark/sweep", post(run_node_benchmark_sweep))
+        // MPC network partition detection (Issue #236)
+        .route("/api/mpc/partition/report", post(submit_partition_report))
+        .route("/api/mpc/partition/status", get(get_partition_status))
+        // MPC node identity verification via Stellar addresses (Issue #237)
+        .route("/api/mpc/identity/register", post(register_node_identity))
+        .route("/api/mpc/identity/nodes", get(list_node_identities))
+        .route("/api/mpc/identity/verify", post(verify_node_identity))
         .route("/api/flags", get(api::flags::list_flags))
         .route("/api/flags/:key", post(api::flags::set_flag))
         // Plugin management endpoints
@@ -845,10 +1045,7 @@ async fn main() {
         .route("/api/tables/open", get(api::list_open_tables))
         .route("/api/tables/overview", get(api::list_table_overview))
         .route("/api/stats/player/:address", get(get_player_hud_stats))
-        .route(
-            "/api/ratings/leaderboard",
-            get(get_rating_leaderboard),
-        )
+        .route("/api/ratings/leaderboard", get(get_rating_leaderboard))
         .route("/api/chain-config", get(api::get_chain_config))
         .route("/api/table/:table_id/join", post(api::join_table))
         .route("/api/table/:table_id/lobby", get(api::get_table_lobby))
@@ -866,21 +1063,29 @@ async fn main() {
             post(api::player_action),
         )
         .route(
-            "/api/table/:table_id/rit-opt-in",
-            post(api::rit_opt_in),
+            "/api/table/:table_id/transfer-chips",
+            post(api::transfer_chips),
         )
+        .route("/api/table/:table_id/rit-opt-in", post(api::rit_opt_in))
         .route(
             "/api/table/:table_id/player/:address/cards",
             get(api::get_player_cards),
         )
         .route("/api/table/:table_id/state", get(api::get_table_state))
+        .route(
+            "/api/table/:table_id/players",
+            get(api::get_players_paginated),
+        )
+        .route(
+            "/api/table/:table_id/hand-history/chunk",
+            get(api::get_hand_history_chunk),
+        )
         .route("/api/table/:table_id/mpc-status", get(api::get_mpc_status))
         .route("/api/committee/status", get(api::committee_status))
         .route("/api/table/:table_id/chat/ws", get(chat_ws_handler))
-        .route(
-            "/api/table/:table_id/state/ws",
-            get(game_state_ws_handler),
-        )
+        .route("/api/table/:table_id/state/ws", get(game_state_ws_handler))
+        .route("/api/table/:table_id/spectate/ws", get(spectate_ws_handler))
+        .route("/api/table/:table_id/spectators", get(api::get_spectator_count))
         .route(
             "/api/session/:session_id/cancel",
             post(api::cancel_mpc_session),
@@ -951,6 +1156,38 @@ async fn main() {
         .route(
             "/api/admin/anti-dumping/reports",
             get(api::admin_anti_dumping_reports),
+        // Tournament (sit-and-go) endpoints (Issue #17)
+        .route(
+            "/api/tournaments",
+            get(api::tournament_api::list_tournaments),
+        )
+        .route(
+            "/api/tournaments",
+            post(api::tournament_api::create_tournament),
+        )
+        .route(
+            "/api/tournaments/:id",
+            get(api::tournament_api::get_tournament),
+        )
+        .route(
+            "/api/tournaments/:id/register",
+            post(api::tournament_api::register_player),
+        )
+        .route(
+            "/api/tournaments/:id/start",
+            post(api::tournament_api::start_tournament),
+        )
+        .route(
+            "/api/tournaments/:id/hand-result",
+            post(api::tournament_api::record_hand_result),
+        )
+        .route(
+            "/api/tournaments/:id/balancing",
+            get(api::tournament_api::get_balancing),
+        )
+        .route(
+            "/api/tournaments/:id/cancel",
+            post(api::tournament_api::cancel_tournament),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.idempotency_store.clone(),
@@ -969,6 +1206,13 @@ async fn main() {
             mpc_auth_middleware::authenticate_mpc_request,
         ))
         .layer(middleware::from_fn(request_log::log_request))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limit::RateLimitMiddlewareState {
+                buckets: state.ip_buckets.clone(),
+                rejections: state.rejection_counter.clone(),
+            },
+            rate_limit::ip_rate_limit_middleware,
+        ))
         .layer(build_cors_layer(state.db_pool.as_deref()).await)
         .layer(middleware::from_fn(api_version::rewrite_and_tag_version))
         .with_state(state);
@@ -1362,7 +1606,11 @@ async fn handle_game_state_socket(
     // Greet the client with the current snapshot immediately, so it doesn't
     // have to wait for the next state-changing action.
     if let Some(snapshot) = api::current_game_state_json(&state, table_id).await {
-        if ws_sender.send(Message::Text(snapshot.into())).await.is_err() {
+        if ws_sender
+            .send(Message::Text(snapshot.into()))
+            .await
+            .is_err()
+        {
             return;
         }
     }
@@ -1383,6 +1631,40 @@ async fn handle_game_state_socket(
     tokio::select! {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
+    }
+}
+
+/// GET /api/table/{table_id}/spectate/ws
+///
+/// Anonymous spectator stream (Issue #171). No wallet or auth required.
+/// Delivers the same public game-state snapshots as `/state/ws` (community
+/// cards, phase, on-chain betting state — never hole cards) and counts the
+/// connection towards the table's spectator indicator for as long as it
+/// stays open. Every join/leave broadcasts a `{"type":"spectators"}` frame
+/// on the table's game-state channel.
+async fn spectate_ws_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::Path(table_id): axum::extract::Path<u32>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_spectator_socket(socket, table_id, state))
+}
+
+async fn handle_spectator_socket(socket: WebSocket, table_id: u32, state: AppState) {
+    let guard = state.spectators.join(table_id);
+    broadcast_spectator_count(&state, table_id).await;
+
+    handle_game_state_socket(socket, table_id, state.clone()).await;
+
+    drop(guard);
+    broadcast_spectator_count(&state, table_id).await;
+}
+
+async fn broadcast_spectator_count(state: &AppState, table_id: u32) {
+    let msg = spectators::spectator_count_message(table_id, state.spectators.count(table_id));
+    let channels = state.game_state_channels.lock().await;
+    if let Some(tx) = channels.get(&table_id) {
+        let _ = tx.send(msg);
     }
 }
 
@@ -1436,6 +1718,207 @@ async fn get_benchmarks(State(state): State<AppState>) -> Json<serde_json::Value
         "samples": benchmarks,
         "stats": stats,
     }))
+}
+
+// -- MPC node version negotiation (Issue #233) --------------------------
+
+/// POST /api/mpc/version/register
+///
+/// An MPC node reports the protocol versions and per-circuit ACIR versions
+/// it supports. Called once at node startup and whenever a node upgrades.
+async fn register_node_version(
+    State(state): State<AppState>,
+    Json(caps): Json<mpc_version::NodeCapabilities>,
+) -> axum::http::StatusCode {
+    mpc_version::register_capabilities(&state.version_registry, caps).await;
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// GET /api/mpc/version/nodes
+///
+/// Snapshot of every node's last-reported version capabilities.
+async fn list_node_versions(
+    State(state): State<AppState>,
+) -> Json<Vec<mpc_version::NodeCapabilities>> {
+    Json(mpc_version::list_capabilities(&state.version_registry).await)
+}
+
+/// GET /api/mpc/version/negotiate?nodes=0,1,2&circuits=deal,reveal
+///
+/// Negotiates the highest protocol version and per-circuit version supported
+/// by every listed node. Returns 409 if there's no mutually-compatible
+/// version.
+async fn negotiate_version(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<mpc_version::SessionVersionPlan>, (axum::http::StatusCode, String)> {
+    let node_ids: Vec<String> = params
+        .get("nodes")
+        .map(|s| s.split(',').map(|n| n.trim().to_string()).collect())
+        .unwrap_or_default();
+    if node_ids.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "missing 'nodes' query param".to_string(),
+        ));
+    }
+    let circuit_names: Vec<String> = params
+        .get("circuits")
+        .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
+        .unwrap_or_default();
+    let circuit_refs: Vec<&str> = circuit_names.iter().map(|s| s.as_str()).collect();
+
+    mpc_version::negotiate_session(&state.version_registry, &node_ids, &circuit_refs)
+        .await
+        .map(Json)
+        .map_err(|e| (axum::http::StatusCode::CONFLICT, e))
+}
+
+// -- MPC node benchmarking suite (Issue #234) ----------------------------
+
+/// POST /api/mpc/benchmark/sample
+///
+/// An MPC node self-reports a performance sample (proof throughput, memory,
+/// CPU) for a session or probing interval.
+async fn record_node_benchmark(
+    State(state): State<AppState>,
+    Json(sample): Json<mpc_node_benchmark::NodeBenchmarkSample>,
+) -> axum::http::StatusCode {
+    mpc_node_benchmark::record_sample(&state.node_benchmark_store, sample);
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// GET /api/mpc/benchmark/report
+///
+/// Aggregated per-node performance report (avg/min/max throughput, latency,
+/// memory, CPU) built from all recorded samples.
+async fn get_node_benchmark_report(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let samples = mpc_node_benchmark::get_samples(&state.node_benchmark_store, None);
+    let report = mpc_node_benchmark::generate_report(&samples);
+    Json(serde_json::json!({
+        "sample_count": samples.len(),
+        "report": report,
+    }))
+}
+
+/// POST /api/mpc/benchmark/sweep
+///
+/// Actively probes every configured MPC node's `/health` endpoint right now
+/// to measure network latency (and any self-reported resource metrics),
+/// recording the results.
+async fn run_node_benchmark_sweep(
+    State(state): State<AppState>,
+) -> Json<Vec<mpc_node_benchmark::NodeBenchmarkSample>> {
+    let nodes: Vec<(String, String)> = state
+        .mpc_config
+        .node_endpoints
+        .iter()
+        .enumerate()
+        .map(|(i, endpoint)| (i.to_string(), endpoint.clone()))
+        .collect();
+    let samples = mpc_node_benchmark::run_benchmark_sweep(
+        &state.node_benchmark_store,
+        &state.mpc_client,
+        &nodes,
+    )
+    .await;
+    Json(samples)
+}
+
+// -- MPC network partition detection (Issue #236) ------------------------
+
+#[derive(Deserialize)]
+struct PartitionReportRequest {
+    reporter_node_id: String,
+    unreachable_nodes: Vec<String>,
+}
+
+/// POST /api/mpc/partition/report
+///
+/// An MPC node reports which peers it currently cannot reach. The
+/// coordinator only declares a node partitioned once a quorum of its peers
+/// independently confirm the same thing.
+async fn submit_partition_report(
+    State(state): State<AppState>,
+    Json(req): Json<PartitionReportRequest>,
+) -> axum::http::StatusCode {
+    let all_node_ids: Vec<String> = if state.mpc_config.node_endpoints.is_empty() {
+        state.node_registry.read().await.healthy_node_ids()
+    } else {
+        (0..state.mpc_config.node_endpoints.len())
+            .map(|i| i.to_string())
+            .collect()
+    };
+
+    let mut detector = state.partition_store.write().await;
+    detector.submit_report(
+        &req.reporter_node_id,
+        req.unreachable_nodes.into_iter().collect(),
+        &all_node_ids,
+    );
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// GET /api/mpc/partition/status
+///
+/// Currently partitioned nodes and any sessions paused as a result.
+async fn get_partition_status(
+    State(state): State<AppState>,
+) -> Json<mpc_partition::PartitionStatus> {
+    let detector = state.partition_store.read().await;
+    Json(detector.status())
+}
+
+// -- MPC node identity verification (Issue #237) -------------------------
+
+#[derive(Deserialize)]
+struct RegisterNodeIdentityRequest {
+    node_id: String,
+    stellar_address: String,
+}
+
+/// POST /api/mpc/identity/register
+///
+/// Registers (or updates) the Stellar address the coordinator trusts for a
+/// given MPC node id in the committee registry. Intended for admin/operator
+/// use when onboarding or rotating a node's keypair.
+async fn register_node_identity(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterNodeIdentityRequest>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    mpc_identity::register_node_identity(
+        &state.committee_registry,
+        &req.node_id,
+        &req.stellar_address,
+    )
+    .await
+    .map(|_| axum::http::StatusCode::NO_CONTENT)
+    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))
+}
+
+/// GET /api/mpc/identity/nodes
+///
+/// The committee registry: MPC node id -> trusted Stellar address.
+async fn list_node_identities(State(state): State<AppState>) -> Json<HashMap<String, String>> {
+    Json(state.committee_registry.read().await.clone())
+}
+
+/// POST /api/mpc/identity/verify
+///
+/// Verifies that a session message was genuinely signed by the Stellar
+/// keypair registered for its `node_id` in the committee registry.
+async fn verify_node_identity(
+    State(state): State<AppState>,
+    Json(msg): Json<mpc_identity::SignedSessionMessage>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    mpc_identity::verify_session_message_with_tracker(
+        &state.committee_registry,
+        &msg,
+        Some(&state.mpc_nonce_tracker),
+    )
+    .await
+    .map(|_| axum::http::StatusCode::NO_CONTENT)
+    .map_err(|e| (axum::http::StatusCode::UNAUTHORIZED, e))
 }
 
 /// GET /api/leader

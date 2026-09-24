@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Shared query parameters for offset/limit paginated endpoints.
+#[derive(Deserialize, ToSchema)]
+pub struct PaginatedQuery {
+    pub offset: Option<u32>,
+    pub limit: Option<u32>,
+}
+
 /// Per-node MPC phase progress for a specific table, returned by
 /// `GET /api/table/:table_id/mpc-status` and included in WebSocket pushes.
 #[derive(Serialize, Clone, ToSchema)]
@@ -69,6 +76,9 @@ pub struct ShowdownResponse {
 pub struct PlayerActionRequest {
     pub action: String,
     pub amount: Option<i128>,
+    /// Monotonically increasing sequence number for (player, table).
+    /// Prevents replay / front-running attacks on betting actions.
+    pub seq: u32,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -151,6 +161,8 @@ pub struct OpenTableInfo {
     pub max_players: u32,
     pub joined_wallets: usize,
     pub open_wallet_slots: usize,
+    /// Live anonymous spectators (Issue #171).
+    pub spectators: usize,
 }
 
 /// Multi-table overview entry for the mini-map (Issue #53).
@@ -162,6 +174,14 @@ pub struct TableOverviewInfo {
     pub seated: usize,
     pub total_chips: i64,
     pub stacks: Vec<i64>,
+    /// Live anonymous spectators (Issue #171).
+    pub spectators: usize,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SpectatorCountResponse {
+    pub table_id: u32,
+    pub spectator_count: usize,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -227,3 +247,26 @@ pub struct WalletVerifyResponse {
     pub verified: bool,
 }
 
+/// Request body for cross-table chip transfer.
+/// Allows a player to transfer chips from one table to another they are seated at.
+/// A small fee is deducted from the transferred amount.
+#[derive(Deserialize, ToSchema)]
+pub struct TransferChipsRequest {
+    /// Destination table ID where chips will be transferred to.
+    pub destination_table_id: u32,
+    /// Amount of chips to transfer (before fee deduction).
+    pub amount: i128,
+}
+
+/// Response for cross-table chip transfer.
+#[derive(Serialize, ToSchema)]
+pub struct TransferChipsResponse {
+    pub status: String,
+    pub source_table_id: u32,
+    pub destination_table_id: u32,
+    pub amount: i128,
+    pub fee: i128,
+    pub net_amount: i128,
+    pub source_tx_hash: Option<String>,
+    pub dest_tx_hash: Option<String>,
+}

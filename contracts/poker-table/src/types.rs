@@ -1,4 +1,19 @@
-use soroban_sdk::{contracterror, contracttype, Address, BytesN, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Env, Vec};
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BettingStructure {
+    NoLimit,
+    PotLimit,
+    FixedLimit(FixedLimitConfig),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixedLimitConfig {
+    pub small_bet: i128,
+    pub big_bet: i128,
+}
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -6,8 +21,12 @@ pub struct TableConfig {
     pub token: Address, // Payment token (e.g., USDC)
     pub min_buy_in: i128,
     pub max_buy_in: i128,
-    pub small_blind: i128,
-    pub big_blind: i128,
+    pub betting_structure: BettingStructure,
+    /// Blinds/ante structure for this table. A single-level schedule with
+    /// `duration_seconds: 0` behaves as fixed blinds; multiple levels with
+    /// nonzero `duration_seconds` produce an escalating (tournament-style)
+    /// structure, optionally with an ante at any level.
+    pub blinds_schedule: BlindsSchedule,
     /// Minimum seated players required to start a hand.
     pub min_players: u32,
     /// Maximum seated players allowed at the table. Capped at 6.
@@ -34,6 +53,320 @@ pub struct TableConfig {
     /// Minimum rank of the quad / trips / card required within the
     /// qualifying category (e.g. `12` = Ace).
     pub min_bad_beat_rank: u32,
+    /// Per-street action time limits in seconds. Allows different time
+    /// limits for each betting street (e.g. shorter for turbo tables).
+    /// `None` falls back to the global `timeout_ledgers` converted to seconds.
+    pub street_time_limit: Option<StreetTimeLimit>,
+    /// Treasury contract address for sweeping uncollected/dead chips.
+    /// When set, unclaimed chips from abandoned tables are transferred here
+    /// after the dead chip timeout expires.
+    pub treasury: Option<Address>,
+    /// Ledgers after which uncollected chips in Settlement phase are considered
+    /// "dead" and can be swept to the treasury. `0` disables dead chip sweeping.
+    pub dead_chip_timeout_ledgers: u32,
+    /// Ledgers after sweeping during which players can reclaim their swept chips
+    /// by proving ownership (calling `reclaim_dead_chips` with a signed message).
+    /// `0` disables reclaim period (chips are permanently transferred to treasury).
+    pub reclaim_period_ledgers: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnteMode {
+    Fixed(i128),
+    Percentage(u32), // percentage of big blind
+    None,
+}
+
+/// A single blinds/ante level in a table's schedule.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BlindLevel {
+    pub small_blind: i128,
+    pub big_blind: i128,
+    /// Ante collected from every seated player at the start of each hand
+    /// while this level is active.
+    pub ante: AnteMode,
+    /// How long this level lasts once active, in seconds, before the
+    /// schedule advances to the next level. Ignored on the final level
+    /// (which lasts indefinitely once reached). `0` on a single-level
+    /// schedule means the level never advances (fixed blinds).
+    pub duration_seconds: u64,
+    /// Optional break duration in seconds after this level expires, before
+    /// the next level starts. During a break no hands are dealt; the
+    /// coordinator must wait for the break to elapse before starting a new
+    /// hand. `0` means no break. Break is only meaningful on non-final
+    /// levels with a nonzero `duration_seconds`.
+    pub break_seconds: u64,
+}
+
+/// Ordered blinds levels for a table. `levels[0]` is active from table
+/// creation; the active level advances by wall-clock time as hands are
+/// played (checked at the start of each new hand).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BlindsSchedule {
+    pub levels: Vec<BlindLevel>,
+}
+
+impl BlindsSchedule {
+    /// A single-level, non-escalating schedule: fixed blinds, no ante.
+    pub fn fixed(env: &Env, small_blind: i128, big_blind: i128) -> Self {
+        let mut levels = Vec::new(env);
+        levels.push_back(BlindLevel {
+            small_blind,
+            big_blind,
+            ante: AnteMode::None,
+            duration_seconds: 0,
+            break_seconds: 0,
+        });
+        BlindsSchedule { levels }
+    }
+}
+
+/// A player waiting for a seat to open at a full table. `buy_in` has
+/// already been transferred into contract escrow at queue-join time, so no
+/// further authorization is needed from the player when they're auto-seated.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct QueueEntry {
+    pub player: Address,
+    pub buy_in: i128,
+}
+
+/// A pending contract-wasm upgrade, committed to at `propose_upgrade` time
+/// and only executable once `execute_after` has passed. `execute_upgrade`
+/// always uses the hash stored here rather than one passed in again, so the
+/// executed upgrade is guaranteed to match what was originally proposed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpgradeProposal {
+    pub new_wasm_hash: BytesN<32>,
+    pub execute_after: u64, // ledger timestamp (seconds)
+}
+
+/// Record of the most recently *executed* upgrade for a table, kept so
+/// `revert_last_upgrade` can fast-rollback without a new timelock if the
+/// new code's error rate spikes post-rollout (issue #348 — see
+/// docs/adr/ADR-006-canary-contract-upgrades.md).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpgradeRecord {
+    /// Hash the contract was upgraded *from*. `None` when this is the
+    /// first upgrade this mechanism has ever tracked for the table — its
+    /// genesis wasm hash was never recorded on-chain, so there's nothing
+    /// to revert to.
+    pub previous_wasm_hash: Option<BytesN<32>>,
+    pub new_wasm_hash: BytesN<32>,
+    pub executed_at: u64, // ledger timestamp (seconds)
+}
+
+/// Position where a straddle is posted.
+///
+/// Mississippi straddle extends support so *any* position can straddle,
+/// not just the classic BigBlind/UTG spots. See docs for live/dormant semantics.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum StraddlePosition {
+    BigBlind,
+    Utg,
+    Button,
+    /// Mississippi straddle — any seated player may post the straddle.
+    /// When configured, the straddle seat is chosen dynamically via
+    /// `post_mississippi_straddle` or defaults to the button if nobody volunteers.
+    Mississippi,
+    /// Any position (alias for Mississippi for API ergonomics).
+    Any,
+    /// Explicit seat index.
+    Custom(u32),
+}
+
+/// Configuration for an optional straddle (2x or 3x big blind) that
+/// can be posted before cards are dealt.
+///
+/// Extended (v2) with Mississippi support and config flags:
+/// - `live_only`: when true the straddle is a live blind (straddler acts last preflop)
+/// - `amount_cap`: maximum straddle amount (0 = no cap). If the computed amount
+///   exceeds the cap, it is capped rather than reverting.
+/// - `allow_reraise`: when false the straddler has no re-raise option (must check
+///   if unraised).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StraddleConfig {
+    pub multiplier: u32, // 0 = disabled, 2 = 2x, 3 = 3x
+    pub position: StraddlePosition,
+    pub live_only: bool,
+    pub amount_cap: i128,
+    pub allow_reraise: bool,
+}
+
+impl StraddleConfig {
+    pub fn new(
+        multiplier: u32,
+        position: StraddlePosition,
+        live_only: bool,
+        amount_cap: i128,
+        allow_reraise: bool,
+    ) -> Self {
+        Self {
+            multiplier,
+            position,
+            live_only,
+            amount_cap,
+            allow_reraise,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            multiplier: 0,
+            position: StraddlePosition::BigBlind,
+            live_only: false,
+            amount_cap: 0,
+            allow_reraise: true,
+        }
+    }
+
+    /// Effective straddle amount after applying the cap.
+    pub fn effective_amount(&self, big_blind: i128, is_big_blind_straddle: bool) -> i128 {
+        let raw = if is_big_blind_straddle {
+            big_blind * (self.multiplier as i128 - 1).max(0)
+        } else {
+            big_blind * self.multiplier as i128
+        };
+        if self.amount_cap > 0 && raw > self.amount_cap {
+            self.amount_cap
+        } else {
+            raw
+        }
+    }
+}
+
+/// Mississippi straddle pending entry — a player volunteers to straddle for the
+/// next hand.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MississippiStraddle {
+    pub player: Address,
+    pub seat: u32,
+    pub amount: i128,
+    pub live_only: bool,
+    pub allow_reraise: bool,
+}
+
+/// Active straddle state for the current hand (includes live/re-raise flags).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ActiveStraddle {
+    pub seat: u32,
+    pub amount: i128,
+    pub live_only: bool,
+    pub allow_reraise: bool,
+    pub position: StraddlePosition,
+}
+
+/// Per-street action time limits in seconds. Allows different time limits
+/// for each betting street (e.g. shorter for preflop in turbo tables).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreetTimeLimit {
+    /// Time limit for preflop actions, in seconds.
+    pub preflop_seconds: u64,
+    /// Time limit for flop actions, in seconds.
+    pub flop_seconds: u64,
+    /// Time limit for turn actions, in seconds.
+    pub turn_seconds: u64,
+    /// Time limit for river actions, in seconds.
+    pub river_seconds: u64,
+}
+
+impl StreetTimeLimit {
+    /// Standard time limits: 30s preflop, 60s for other streets.
+    pub fn standard() -> Self {
+        StreetTimeLimit {
+            preflop_seconds: 30,
+            flop_seconds: 60,
+            turn_seconds: 60,
+            river_seconds: 60,
+        }
+    }
+
+    /// Turbo time limits: 15s preflop, 20s for other streets.
+    pub fn turbo() -> Self {
+        StreetTimeLimit {
+            preflop_seconds: 15,
+            flop_seconds: 20,
+            turn_seconds: 20,
+            river_seconds: 20,
+        }
+    }
+
+    /// Get the time limit for a given game phase.
+    pub fn for_phase(&self, phase: &GamePhase) -> u64 {
+        match phase {
+            GamePhase::Preflop => self.preflop_seconds,
+            GamePhase::Flop => self.flop_seconds,
+            GamePhase::Turn => self.turn_seconds,
+            GamePhase::River => self.river_seconds,
+            _ => self.preflop_seconds,
+        }
+    }
+}
+
+/// A cryptographic commitment to a player's action, stored on-chain for
+/// dispute resolution. The coordinator submits commitments; in case of
+/// dispute, anyone can request the coordinator to reveal the action data,
+/// which is verified against the stored commitment.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ActionCommitment {
+    /// The action the player took.
+    pub action: Action,
+    /// Amount for bet/raise actions.
+    pub amount: i128,
+    /// The seat of the player who took the action.
+    pub seat: u32,
+    /// The game phase when the action was taken.
+    pub phase: GamePhase,
+    /// Ledger timestamp when the commitment was stored.
+    pub committed_at: u64,
+    /// Whether this commitment has been revealed in a dispute.
+    pub revealed: bool,
+}
+
+/// Aggregate hand type distribution statistics across all tables.
+/// Used for proving randomness and fairness of the deal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct HandTypeDistribution {
+    /// Count of each hand type: [HighCard, OnePair, TwoPair, ThreeOfAKind,
+    /// Straight, Flush, FullHouse, FourOfAKind, StraightFlush, RoyalFlush]
+    pub counts: Vec<u64>,
+    /// Total number of hands observed.
+    pub total_hands: u64,
+    /// Total number of showdown hands (non-fold).
+    pub total_showdowns: u64,
+}
+
+impl HandTypeDistribution {
+    pub fn new(env: &Env) -> Self {
+        let counts = Vec::from_array(env, [0u64; 10]);
+        HandTypeDistribution {
+            counts,
+            total_hands: 0,
+            total_showdowns: 0,
+        }
+    }
+}
+
+/// Bookkeeping for per-table action commitments used in dispute resolution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ActionCommitmentMeta {
+    /// Next action index for the current hand.
+    pub next_index: u32,
+    /// Number of commitments stored for the current hand.
+    pub stored: u32,
 }
 
 #[contracterror]
@@ -99,6 +432,71 @@ pub enum PokerTableError {
     NoPendingUpgrade = 54,
     InvalidGovernanceConfig = 55,
     UpgradeAlreadyApproved = 56,
+    JackpotNotConfigured = 51,
+    BadBeatHandDataInvalid = 52,
+    StaleActionSequence = 53,
+    EmptyBlindsSchedule = 54,
+    InvalidBlindLevel = 55,
+    AlreadyQueued = 56,
+    NotQueued = 57,
+    QueueFull = 58,
+    NoUpgradeProposal = 59,
+    UpgradeDelayNotElapsed = 60,
+    UpgradeDelayTooShort = 61,
+    InvalidVarianceConfig = 62,
+    TableClosureNotProposed = 63,
+    TableClosureNoticeActive = 64,
+    TableClosureNotReady = 65,
+    TableClosureInProgress = 66,
+    InvalidStraddleConfig = 67,
+    EmergencyWithdrawalNotApplicable = 68,
+    EmergencyTimelockActive = 69,
+    AlreadyApprovedEmergencyWithdrawal = 70,
+    ActionAlreadyCommitted = 71,
+    ActionCommitmentNotFound = 72,
+    InvalidActionReveal = 73,
+    InvalidHandType = 74,
+    /// Treasury contract not configured for this table.
+    TreasuryNotConfigured = 75,
+    /// Dead chip timeout not configured (dead_chip_timeout_ledgers is 0).
+    DeadChipTimeoutNotConfigured = 76,
+    /// Cannot sweep dead chips in current phase (only allowed in Settlement).
+    DeadChipsNotSweepable = 77,
+    /// Dead chip timeout not yet reached.
+    DeadChipTimeoutNotReached = 78,
+    /// Dead chips have already been swept for this table.
+    DeadChipsAlreadySwept = 79,
+    /// No dead chip sweep state found for this table.
+    DeadChipsNotSwept = 80,
+    /// Reclaim period not configured (reclaim_period_ledgers is 0).
+    ReclaimPeriodNotConfigured = 81,
+    /// Reclaim period has elapsed.
+    ReclaimPeriodElapsed = 82,
+    /// No dead chips to reclaim for this player.
+    NoDeadChipsToReclaim = 83,
+    /// Invalid signature provided for reclaim.
+    InvalidSignature = 84,
+    // --- Straddle extensions (Mississippi) ---
+    StraddleNotAllowed = 85,
+    StraddleCapExceeded = 86,
+    MississippiStraddleAlreadyPosted = 87,
+    NoMississippiStraddle = 88,
+    // --- Time bank ---
+    TimeBankNotConfigured = 89,
+    TimeBankExhausted = 90,
+    TimeBankAlreadyUsed = 91,
+    InvalidTimeBankConfig = 92,
+    NotYourTurnForTimeBank = 93,
+    // --- RBAC ---
+    RbacNotConfigured = 94,
+    InsufficientPermission = 95,
+    // --- Jackpot verifier ---
+    JackpotProofInvalid = 96,
+    JackpotNotEnabled = 97,
+    JackpotAlreadyClaimed = 98,
+    InvalidAction = 99,
+    NoUpgradeToRevert = 100,
+    RollbackWindowExpired = 101,
 }
 
 #[contracttype]
@@ -127,6 +525,7 @@ pub struct PlayerState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GamePhase {
     Waiting,      // Waiting for players
+    WaitingForPlayers, // Alias for Waiting (legacy)
     Dealing,      // Committee is dealing
     Preflop,      // Betting round: preflop
     DealingFlop,  // Committee revealing flop
@@ -140,9 +539,9 @@ pub enum GamePhase {
     Dispute,      // Something went wrong; funds frozen
     // Run-It-Twice phases
     AwaitingRunItTwice, // Waiting for all-in players to decide on RIT
-    ShowdownRun1,     // First run's showdown
-    ShowdownRun2,     // Second run's showdown
-    RitSettlement,    // Pot split between two runs
+    ShowdownRun1,       // First run's showdown
+    ShowdownRun2,       // Second run's showdown
+    RitSettlement,      // Pot split between two runs
 }
 
 #[contracttype]
@@ -274,6 +673,104 @@ pub struct PendingUpgrade {
     pub approvals: Vec<Address>,
     /// Ledger sequence the proposal was first opened on.
     pub started_ledger: u32,
+/// Cumulative winner distribution used to detect unusually concentrated table
+/// outcomes. Counts are indexed by seat.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VarianceStats {
+    pub hands: u32,
+    pub winner_counts: Vec<u32>,
+    pub variance_bps: u32,
+}
+
+/// Controls when concentrated outcomes receive extra jackpot funding.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VarianceConfig {
+    pub threshold_bps: u32,
+    pub extra_jackpot_share_bps: u32,
+}
+
+/// Tracks the state of dead chip sweeping for a table.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SweepState {
+    /// Ledger sequence when the sweep was executed.
+    pub swept_at_ledger: u32,
+    /// Total amount swept to treasury.
+    pub total_swept: i128,
+    /// Per-player amounts that were swept (for reclaim verification).
+    pub swept_amounts: Vec<(Address, i128)>,
+}
+
+/// Per-player time bank for difficult decisions.
+///
+/// Each player has a personal reservoir of extra seconds that replenishes
+/// slowly and can be spent to extend the action deadline when they need more
+/// time to think. Enforcement is done at the contract level via deadline checks.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TimeBank {
+    /// Seconds remaining in the player's time bank.
+    pub remaining_seconds: u64,
+    /// Ledger sequence when the bank was last replenished.
+    pub last_replenish_ledger: u32,
+    /// Number of times this player has dipped into the time bank this hand.
+    pub extensions_used_this_hand: u32,
+    /// Whether time bank was used for the current decision.
+    pub active_extension: bool,
+    /// How many seconds the current extension added.
+    pub active_extension_seconds: u64,
+}
+
+/// Configuration for per-player time banks.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TimeBankConfig {
+    /// Initial time bank allocation when a player joins (seconds).
+    pub initial_seconds: u64,
+    /// Maximum time bank capacity (seconds).
+    pub max_seconds: u64,
+    /// Replenish rate: seconds added per hand completed.
+    pub replenish_per_hand: u64,
+    /// Replenish rate: seconds added per ledger (0 = no ledger-based replenish).
+    pub replenish_per_ledger: u64,
+    /// How many seconds a single extension grants.
+    pub extension_seconds: u64,
+    /// Maximum extensions a player may use per hand.
+    pub max_extensions_per_hand: u32,
+}
+
+impl TimeBankConfig {
+    pub fn default_config() -> Self {
+        TimeBankConfig {
+            initial_seconds: 60,
+            max_seconds: 120,
+            replenish_per_hand: 10,
+            replenish_per_ledger: 0,
+            extension_seconds: 30,
+            max_extensions_per_hand: 2,
+        }
+    }
+    pub fn disabled() -> Self {
+        TimeBankConfig {
+            initial_seconds: 0,
+            max_seconds: 0,
+            replenish_per_hand: 0,
+            replenish_per_ledger: 0,
+            extension_seconds: 0,
+            max_extensions_per_hand: 0,
+        }
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.max_seconds > 0 && self.extension_seconds > 0
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TableClosureProposal {
+    pub execute_after: u64,
 }
 
 #[contracttype]
@@ -313,6 +810,18 @@ pub struct TableState {
     /// The next raise must be at least this large (standard poker minimum-raise
     /// rule). Cleared to `big_blind` when a new betting round begins.
     pub last_raise_size: i128,
+    /// Index into `config.blinds_schedule.levels` of the currently active
+    /// blinds level.
+    pub current_blind_level: u32,
+    /// Ledger timestamp (seconds) at which the current blind level began.
+    pub level_started_at: u64,
+    /// If the current level has a break, this is the timestamp (seconds) at
+    /// which the break ends and the next level becomes active. `0` means no
+    /// break is in progress.
+    pub break_ends_at: u64,
+    /// Ledger sequence when the table entered Settlement phase.
+    /// Used to calculate dead chip timeout for uncollected pots.
+    pub settlement_entered_ledger: u32,
 }
 
 #[contracttype]
@@ -336,4 +845,49 @@ pub enum DataKey {
     PendingUpgrade(u32),
     /// Most recent on-chain chip-dumping evidence report (Issue #506).
     ChipDumpingReport(u32),
+    /// Per-player per-table monotonically increasing action sequence counter.
+    /// Used to reject stale or replayed betting actions.
+    PlayerActionCounter(u32, Address),
+    Queue(u32), // waiting-list queue for a full table
+    UpgradeProposal(u32),
+    /// The most recently *executed* upgrade for a table (issue #348).
+    LastUpgrade(u32),
+    /// Per-table outcome distribution and variance state.
+    VarianceStats(u32),
+    /// Per-table variance-triggered jackpot funding configuration.
+    VarianceConfig(u32),
+    /// Pending forced closure notice for a table.
+    TableClosure(u32),
+    /// Per-table straddle configuration.
+    StraddleConfig(u32),
+    /// Seat index of the player who posted a straddle for the current hand.
+    ActiveStraddleSeat(u32),
+    /// Addresses of players who approved emergency withdrawal for a table.
+    EmergencyApprovals(u32),
+    /// Action commitment for dispute resolution: (table_id, hand_number, action_index).
+    ActionCommitment(u32, u32, u32),
+    /// Bookkeeping for action commitments per table.
+    ActionCommitmentMeta(u32),
+    /// Aggregate hand type distribution statistics (global).
+    HandTypeDistribution,
+    /// Dead chip sweep state: (table_id) -> SweepState
+    DeadChipSweep(u32),
+    /// Per-player time bank: (table_id, player) -> TimeBank
+    TimeBank(u32, Address),
+    /// Time bank config per table: (table_id) -> TimeBankConfig
+    TimeBankConfig(u32),
+    /// Mississippi straddle pending: (table_id) -> MississippiStraddle
+    MississippiPending(u32),
+    /// Extended active straddle state including live/re-raise flags
+    ActiveStraddleState(u32),
+    /// RBAC: per-table auth manager override (instance storage mirror)
+    AuthManager(u32),
+    /// RBAC: role assignment audit log position
+    RbacAudit(u32),
+    /// Jackpot verifier contract per table
+    JackpotVerifier(u32),
+    /// Jackpot claim history: (table_id, hand_number) -> Address claimant
+    JackpotClaim(u32, u32),
+    /// Commit-reveal scheme: action hash commitment: (table_id, hand_number, seat) -> hash
+    ActionCommitmentHash(u32, u32, u32),
 }

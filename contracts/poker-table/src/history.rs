@@ -71,9 +71,7 @@ pub fn archive_hand(
 
     let mut resolved: Vec<Payout> = Vec::new(env);
     for i in 0..payouts.len() {
-        let (seat, amount) = payouts
-            .get(i)
-            .ok_or(PokerTableError::InvalidPlayerIndex)?;
+        let (seat, amount) = payouts.get(i).ok_or(PokerTableError::InvalidPlayerIndex)?;
         let player = table
             .players
             .get(seat)
@@ -139,6 +137,39 @@ pub fn get_history(env: &Env, table_id: u32, limit: u32) -> Vec<HandRecord> {
         if let Some(record) = load_record(env, table_id, slot) {
             out.push_back(record);
         }
+        slot = (slot + HAND_HISTORY_CAPACITY - 1) % HAND_HISTORY_CAPACITY;
+    }
+    out
+}
+
+/// Read a chunk of archived hands with offset-based pagination (newest first).
+///
+/// * `offset` — how many records to skip from the newest (0 = start at newest).
+/// * `limit` — max records to return (capped at HAND_HISTORY_CAPACITY).
+///
+/// Each record read has its TTL extended (bump/footprint pattern).
+pub fn get_history_chunk(env: &Env, table_id: u32, offset: u32, limit: u32) -> Vec<HandRecord> {
+    let meta = load_meta(env, table_id);
+    let mut out: Vec<HandRecord> = Vec::new(env);
+    if meta.stored == 0 || offset >= meta.stored {
+        return out;
+    }
+    let take = core::cmp::min(limit, meta.stored.saturating_sub(offset));
+    if take == 0 {
+        return out;
+    }
+
+    // Walk backwards from the most recently written slot, skipping `offset`
+    // records, then taking `take` records.
+    let newest_slot = (meta.next_slot + HAND_HISTORY_CAPACITY - 1) % HAND_HISTORY_CAPACITY;
+    let start_slot = (newest_slot + HAND_HISTORY_CAPACITY - offset) % HAND_HISTORY_CAPACITY;
+
+    let mut slot = start_slot;
+    for _ in 0..take {
+        if let Some(record) = load_record(env, table_id, slot) {
+            out.push_back(record);
+        }
+        // Wrap backwards; underflow is prevented by the circular buffer math.
         slot = (slot + HAND_HISTORY_CAPACITY - 1) % HAND_HISTORY_CAPACITY;
     }
     out

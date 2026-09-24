@@ -11,11 +11,17 @@ pub fn start_new_hand(env: &Env, table: &mut TableState) -> Result<(), PokerTabl
     table.hand_number += 1;
 
     // Rotate dealer button
-    let num_players = table.players.len() as u32;
-    if num_players < table.config.min_players {
-        return Err(PokerTableError::NotEnoughPlayers);
+    let previous_dealer = table.dealer_seat;
+    let next_dealer =
+        next_active_seat(table, table.dealer_seat).ok_or(PokerTableError::NotEnoughPlayers)?;
+    table.dealer_seat = next_dealer;
+
+    if previous_dealer != next_dealer {
+        env.events().publish(
+            (Symbol::new(env, "button_position_changed"), table.id),
+            (previous_dealer, next_dealer),
+        );
     }
-    table.dealer_seat = (table.dealer_seat + 1) % num_players;
 
     // Reset player states
     for i in 0..table.players.len() {
@@ -30,12 +36,193 @@ pub fn start_new_hand(env: &Env, table: &mut TableState) -> Result<(), PokerTabl
         table.players.set(i, p);
     }
 
-    // Post blinds
-    let sb_seat = (table.dealer_seat + 1) % num_players;
-    let bb_seat = (table.dealer_seat + 2) % num_players;
+    advance_blind_level_if_due(env, table);
 
-    post_blind(table, sb_seat, table.config.small_blind)?;
-    post_blind(table, bb_seat, table.config.big_blind)?;
+    // Check if a break is active — if so, deny starting a new hand.
+    if table.break_ends_at > 0 {
+        let now = env.ledger().timestamp();
+        if now < table.break_ends_at {
+            return Err(PokerTableError::HandAlreadyInProgress);
+        }
+        // Break has elapsed; clear it and advance to next level.
+        table.break_ends_at = 0;
+        let num_levels = table.config.blinds_schedule.levels.len();
+        if table.current_blind_level + 1 < num_levels {
+            table.current_blind_level += 1;
+            table.level_started_at = now;
+            env.events().publish(
+                (Symbol::new(env, "blind_level_advanced"), table.id),
+                table.current_blind_level,
+            );
+            env.events().publish(
+                (Symbol::new(env, "level_up"), table.id),
+                table.current_blind_level,
+            );
+        }
+    }
+
+    let level = current_blind_level(table)?;
+
+    let num_players = table.players.len() as u32;
+
+    // Collect antes from every seated player before blinds. Antes go
+    // straight to the pot and do not count toward `bet_this_round` (unlike
+    // blinds), matching standard tournament ante semantics: they aren't
+    // part of what a player must call to stay in the hand.
+    let ante_amount = match level.ante {
+        AnteMode::Fixed(a) => a,
+        AnteMode::Percentage(p) => {
+            if p > 100 {
+                return Err(PokerTableError::InvalidAntePercentage);
+            }
+            (level.big_blind * p as i128) / 100
+        }
+        AnteMode::None => 0,
+    };
+
+    if ante_amount > 0 {
+        for i in 0..table.players.len() {
+            if let Some(p) = table.players.get(i) {
+                if !p.sitting_out && p.stack > 0 {
+                    post_ante(table, p.seat_index, ante_amount)?;
+                }
+            }
+        }
+    }
+
+    // Post blinds
+    let active_players = active_player_count_for_new_hand(table);
+    if active_players < 2 {
+        return Err(PokerTableError::NotEnoughPlayers);
+    }
+
+    let is_heads_up = active_players == 2;
+    let sb_seat;
+    let bb_seat;
+
+    if is_heads_up {
+        sb_seat = table.dealer_seat;
+        bb_seat = next_active_seat(table, table.dealer_seat).unwrap();
+    } else {
+        sb_seat = next_active_seat(table, table.dealer_seat).unwrap();
+        bb_seat = next_active_seat(table, sb_seat).unwrap();
+    }
+
+    post_blind(table, sb_seat, level.small_blind)?;
+    post_blind(table, bb_seat, level.big_blind)?;
+
+    env.storage()
+        .instance()
+        .remove(&DataKey::ActiveStraddleSeat(table.id));
+    env.storage()
+        .instance()
+        .remove(&DataKey::ActiveStraddleState(table.id));
+    // Replenish time banks at the start of the hand (if configured)
+    crate::time_bank::replenish_all(env, table);
+    // Handle optional straddle (including Mississippi any-position)
+    if let Some(straddle) = env
+        .storage()
+        .instance()
+        .get::<DataKey, StraddleConfig>(&DataKey::StraddleConfig(table.id))
+    {
+        if straddle.multiplier != 0 {
+            // Resolve seat and raw amount based on position
+            let resolved: Option<(u32, i128, bool)> = match straddle.position.clone() {
+                StraddlePosition::BigBlind => Some((
+                    bb_seat,
+                    straddle.effective_amount(level.big_blind, true),
+                    true,
+                )),
+                StraddlePosition::Utg => Some((
+                    (table.dealer_seat + 3) % num_players,
+                    straddle.effective_amount(level.big_blind, false),
+                    false,
+                )),
+                StraddlePosition::Button => Some((
+                    table.dealer_seat,
+                    straddle.effective_amount(level.big_blind, false),
+                    false,
+                )),
+                StraddlePosition::Mississippi | StraddlePosition::Any => {
+                    // Mississippi: check for a pending volunteer straddle
+                    if let Some(pending) = env.storage().instance().get::<
+                        DataKey,
+                        MississippiStraddle,
+                    >(&DataKey::MississippiPending(table.id))
+                    {
+                        let amt = if pending.amount > 0 {
+                            if straddle.amount_cap > 0 && pending.amount > straddle.amount_cap {
+                                straddle.amount_cap
+                            } else {
+                                pending.amount
+                            }
+                        } else {
+                            straddle.effective_amount(level.big_blind, false)
+                        };
+                        Some((pending.seat, amt, false))
+                    } else {
+                        // No volunteer — default to button for backward compat, or skip if no button desired
+                        // We post from button as the natural Mississippi default
+                        Some((
+                            table.dealer_seat,
+                            straddle.effective_amount(level.big_blind, false),
+                            false,
+                        ))
+                    }
+                }
+                StraddlePosition::Custom(seat) => {
+                    if seat < num_players {
+                        Some((
+                            seat,
+                            straddle.effective_amount(level.big_blind, false),
+                            false,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((seat, amount, is_bb)) = resolved {
+                // Enforce cap already via effective_amount; double-check
+                let capped = if straddle.amount_cap > 0 && amount > straddle.amount_cap {
+                    straddle.amount_cap
+                } else {
+                    amount
+                };
+                if capped > 0 {
+                    // For big-blind straddle, the amount is *additional* over the BB already posted
+                    let post_amount = if is_bb {
+                        // BB already posted level.big_blind, so only the extra
+                        capped
+                    } else {
+                        capped
+                    };
+                    post_blind(table, seat, post_amount)?;
+                    let active = ActiveStraddle {
+                        seat,
+                        amount: post_amount,
+                        live_only: straddle.live_only,
+                        allow_reraise: straddle.allow_reraise,
+                        position: straddle.position.clone(),
+                    };
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ActiveStraddleSeat(table.id), &seat);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ActiveStraddleState(table.id), &active);
+                    // Clear Mississippi pending once consumed
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::MississippiPending(table.id));
+                    env.events().publish(
+                        (Symbol::new(env, "straddle_posted"), table.id),
+                        (seat, straddle.multiplier, straddle.live_only, capped, straddle.allow_reraise),
+                    );
+                }
+            }
+        }
+    }
 
     // Clear board state
     table.board_cards = Vec::new(env);
@@ -46,12 +233,97 @@ pub fn start_new_hand(env: &Env, table: &mut TableState) -> Result<(), PokerTabl
     history::reset_actions(env, table);
 
     // Reset minimum-raise size to one big blind for the new hand.
-    table.last_raise_size = table.config.big_blind;
+    table.last_raise_size = level.big_blind;
 
     // Transition to dealing phase (committee will shuffle + deal)
     table.phase = GamePhase::Dealing;
     table.last_action_ledger = env.ledger().sequence();
     table.action_deadline = 0; // No action deadline during Dealing phase
+    Ok(())
+}
+
+/// The blinds/ante level currently active for `table`.
+pub(crate) fn current_blind_level(table: &TableState) -> Result<BlindLevel, PokerTableError> {
+    table
+        .config
+        .blinds_schedule
+        .levels
+        .get(table.current_blind_level)
+        .ok_or(PokerTableError::InvalidBlindLevel)
+}
+
+/// Advance `table.current_blind_level` by one if the active level's
+/// duration has elapsed. A no-op on the final level (which lasts
+/// indefinitely) or if the schedule has only one level.
+///
+/// If the expiring level has a nonzero `break_seconds`, the schedule
+/// enters a break period instead of immediately advancing. During the
+/// break no hands may be started; the next hand triggers the actual
+/// level advance.
+fn advance_blind_level_if_due(env: &Env, table: &mut TableState) {
+    let num_levels = table.config.blinds_schedule.levels.len();
+    if table.current_blind_level + 1 >= num_levels {
+        return;
+    }
+    // Already in a break — do not double-advance.
+    if table.break_ends_at > 0 {
+        return;
+    }
+    let level = match table
+        .config
+        .blinds_schedule
+        .levels
+        .get(table.current_blind_level)
+    {
+        Some(l) => l,
+        None => return,
+    };
+    if level.duration_seconds == 0 {
+        return;
+    }
+    let now = env.ledger().timestamp();
+    if now >= table.level_started_at + level.duration_seconds {
+        if level.break_seconds > 0 {
+            // Enter break period. The next hand will advance the level.
+            table.break_ends_at = now + level.break_seconds;
+            env.events().publish(
+                (Symbol::new(env, "blind_break_started"), table.id),
+                (table.current_blind_level, level.break_seconds),
+            );
+        } else {
+            // No break — advance immediately.
+            table.current_blind_level += 1;
+            table.level_started_at = now;
+            env.events().publish(
+                (Symbol::new(env, "blind_level_advanced"), table.id),
+                table.current_blind_level,
+            );
+            env.events().publish(
+                (Symbol::new(env, "level_up"), table.id),
+                (table.current_blind_level, current_blind_level(table)),
+            );
+        }
+    }
+}
+
+/// Collect an ante from a seat: deducted from stack straight into the pot,
+/// without affecting `bet_this_round` (see call site for why).
+fn post_ante(table: &mut TableState, seat: u32, amount: i128) -> Result<(), PokerTableError> {
+    let mut player = table
+        .players
+        .get(seat)
+        .ok_or(PokerTableError::InvalidPlayerIndex)?;
+    let actual = if player.stack < amount {
+        player.all_in = true;
+        player.stack
+    } else {
+        amount
+    };
+
+    player.stack -= actual;
+    player.committed += actual;
+    table.pot += actual;
+    table.players.set(seat, player);
     Ok(())
 }
 
@@ -68,7 +340,7 @@ fn post_blind(table: &mut TableState, seat: u32, amount: i128) -> Result<(), Pok
     };
 
     player.stack -= actual;
-    player.bet_this_round = actual;
+    player.bet_this_round += actual;
     player.committed += actual;
     table.pot += actual;
     table.players.set(seat, player);
@@ -97,6 +369,34 @@ pub fn last_player_standing(table: &TableState) -> Option<u32> {
         if let Some(p) = table.players.get(i) {
             if !p.folded {
                 return Some(p.seat_index);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn active_player_count_for_new_hand(table: &TableState) -> u32 {
+    let mut count = 0;
+    for i in 0..table.players.len() {
+        if let Some(p) = table.players.get(i) {
+            if !p.sitting_out && p.stack > 0 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+pub(crate) fn next_active_seat(table: &TableState, from_seat: u32) -> Option<u32> {
+    let num_players = table.players.len() as u32;
+    if num_players == 0 {
+        return None;
+    }
+    for i in 1..=num_players {
+        let seat = (from_seat + i) % num_players;
+        if let Some(p) = table.players.get(seat) {
+            if !p.sitting_out && p.stack > 0 {
+                return Some(seat);
             }
         }
     }
@@ -135,8 +435,18 @@ pub fn settle_showdown(
     table.side_pots = net_pots.clone();
 
     // Split rake between house and jackpot pool.
-    let (house_rake, jackpot_rake) =
+    let (mut house_rake, mut jackpot_rake) =
         pot::split_jackpot_rake(rake, table.config.jackpot_rake_share_bps);
+    let variance = crate::record_outcome(env, table, winner_seat)?;
+    if variance.triggered && house_rake > 0 {
+        let extra_jackpot = (house_rake * variance.extra_jackpot_share_bps as i128) / 10_000;
+        house_rake -= extra_jackpot;
+        jackpot_rake += extra_jackpot;
+        env.events().publish(
+            (Symbol::new(env, "variance_jackpot_funded"), table.id),
+            (table.hand_number, variance.variance_bps, extra_jackpot),
+        );
+    }
     table.rake_balance += house_rake;
     table.jackpot_balance += jackpot_rake;
 
@@ -151,6 +461,7 @@ pub fn settle_showdown(
 
     table.pot = 0;
     table.phase = GamePhase::Settlement;
+    table.settlement_entered_ledger = env.ledger().sequence();
     table.last_action_ledger = env.ledger().sequence();
 
     history::archive_hand(env, table, &payouts, total_pot, rake, true)?;
@@ -170,7 +481,13 @@ pub fn settle_showdown(
     if rake > 0 {
         env.events().publish(
             (Symbol::new(env, "rake_collected"), table.id),
-            (table.hand_number, house_rake, jackpot_rake, table.rake_balance, table.jackpot_balance),
+            (
+                table.hand_number,
+                house_rake,
+                jackpot_rake,
+                table.rake_balance,
+                table.jackpot_balance,
+            ),
         );
     }
     Ok(())
@@ -191,7 +508,7 @@ const JACKPOT_OTHERS_SHARE_BPS: i128 = 2000;
 /// A bad beat is triggered when at least one non-winner player at showdown has
 /// a hand score >= the qualifying threshold (computed from
 /// `min_bad_beat_category` and `min_bad_beat_rank`).  The *best* such
- /// qualifying losing hand receives the largest share (60%), the winner
+/// qualifying losing hand receives the largest share (60%), the winner
 /// receives 20%, and the remaining dealt-in players split 20% equally.
 ///
 /// The jackpot balance is reset to zero after payout.
@@ -375,6 +692,7 @@ pub fn settle_fold_win(env: &Env, table: &mut TableState) -> Result<(), PokerTab
         table.pot = 0;
         table.rake_balance += rake;
         table.phase = GamePhase::Settlement;
+        table.settlement_entered_ledger = env.ledger().sequence();
         table.last_action_ledger = env.ledger().sequence();
 
         let mut payouts: Vec<(u32, i128)> = Vec::new(env);
@@ -456,6 +774,7 @@ pub fn settle_rit(env: &Env, table: &mut TableState) -> Result<(), PokerTableErr
 
     table.pot = 0;
     table.phase = GamePhase::Settlement;
+    table.settlement_entered_ledger = env.ledger().sequence();
     table.last_action_ledger = env.ledger().sequence();
 
     history::archive_hand(env, table, &payouts, total_pot, rake, true)?;

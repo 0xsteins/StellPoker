@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  contracts:
-    name: Soroban contracts
+  contracts-check:
+    name: Soroban contracts check & clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo registry
+      - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
           path: |
@@ -28,11 +28,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Check workspace
         run: cargo check --workspace
-
-      - name: Test poker-table contract
-        run: cargo test -p poker-table
 
       - name: Audit contract storage access
         run: python3 scripts/audit_storage_access.py
@@ -51,6 +51,107 @@ jobs:
           python-version: "3.11"
       - name: Enforce forbidden log fields
         run: python3 scripts/check_log_redaction.py
+  contracts-test:
+    name: Soroban contract tests (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [poker-table, zk-verifier, committee-registry, game-hub, player-rating, stellar-zk-cards]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Test ${{ matrix.package }} contract
+        run: cargo test -p ${{ matrix.package }}
+
+  contracts-coverage:
+    name: Contract coverage (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: poker-table
+            min-lines: 80
+          - package: zk-verifier
+            min-lines: 0
+          - package: committee-registry
+            min-lines: 0
+          - package: game-hub
+            min-lines: 0
+          - package: player-rating
+            min-lines: 0
+    env:
+      # Only count the contract under test, not shared crates it pulls in.
+      COV_IGNORE: "stellar-zk-cards/|services/|vendor/"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-cov-
+
+      - name: Run tests with coverage
+        run: |
+          cargo llvm-cov -p ${{ matrix.package }} --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex "$COV_IGNORE"
+          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json --ignore-filename-regex "$COV_IGNORE"
+          cargo llvm-cov report --summary-only --ignore-filename-regex "$COV_IGNORE" | tee coverage-summary.txt
+
+      - name: Publish coverage summary
+        run: |
+          PCT=$(jq -r '.data[0].totals.lines.percent' coverage-summary.json)
+          {
+            echo "### Coverage: ${{ matrix.package }}"
+            echo "Line coverage: ${PCT}% (minimum: ${{ matrix.min-lines }}%)"
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Retained per run so coverage can be tracked over time.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.package }}
+          path: |
+            lcov.info
+            coverage-summary.json
+            coverage-summary.txt
+          retention-days: 90
+
+      - name: Enforce minimum line coverage
+        run: cargo llvm-cov report --fail-under-lines ${{ matrix.min-lines }} --ignore-filename-regex "$COV_IGNORE"
 
   circuits:
     name: Noir circuits
@@ -71,24 +172,22 @@ jobs:
         uses: actions/cache@v4
         with:
           # Compiled ACIR per circuit. Keyed on the nargo version + a hash of
-          # every circuit source so any change busts the cache. No restore-keys
-          # on purpose: a partial match would restore artifacts built from
-          # different sources, which compile-circuits.sh (mtime-based) would
-          # then wrongly treat as up to date and skip. Exact match only.
+          # every circuit source so any change busts the cache. Exact match only.
           path: |
-            circuits/deal_valid/target
-            circuits/reveal_board_valid/target
-            circuits/showdown_valid/target
+            circuits/**/target
           key: ${{ runner.os }}-circuits-1.0.0-beta.17-${{ hashFiles('circuits/**/src/**/*.nr', 'circuits/**/Nargo.toml') }}
-
-      - name: Compile all Noir circuits
-        run: ./scripts/compile-circuits.sh
 
       - name: Install Nargo for tests
         run: |
           curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash
           echo "$HOME/.nargo/bin" >> $GITHUB_PATH
           $HOME/.nargo/bin/noirup -v 1.0.0-beta.17
+
+      - name: Check all circuits
+        run: nargo check --all
+
+      - name: Compile all Noir circuits
+        run: ./scripts/compile-circuits.sh
 
       - name: Run Noir library tests
         run: cd circuits/lib && nargo test
@@ -184,6 +283,13 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: app/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('app/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-modules-
+
       - name: Install dependencies
         run: cd app && npm ci
 
@@ -214,8 +320,8 @@ jobs:
           name: playwright-report-visual
           path: app/playwright-report/
 
-  frontend:
-    name: Next.js frontend
+  frontend-lint:
+    name: Frontend lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -227,11 +333,41 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: app/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('app/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-modules-
+
       - name: Install dependencies
         run: cd app && npm ci
 
       - name: Lint
         run: cd app && npm run lint --if-present
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: app/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('app/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-modules-
+
+      - name: Install dependencies
+        run: cd app && npm ci
 
       - name: Build
         run: cd app && npm run build

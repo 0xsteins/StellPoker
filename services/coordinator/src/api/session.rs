@@ -3,12 +3,15 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid;
 
-use crate::{soroban, AppState, TableSession};
 use super::auth::is_valid_stellar_address;
 use super::parsing::{map_onchain_phase_to_local, normalize_field_value, parse_u32_value};
 use super::{MAX_PLAYERS, MIN_PLAYERS};
+use crate::{soroban, AppState, TableSession};
 
-pub(crate) async fn ensure_session_exists(state: &AppState, table_id: u32) -> Result<(), StatusCode> {
+pub(crate) async fn ensure_session_exists(
+    state: &AppState,
+    table_id: u32,
+) -> Result<(), StatusCode> {
     {
         let tables = state.tables.read().await;
         if tables.contains_key(&table_id) {
@@ -92,10 +95,7 @@ pub(crate) async fn fetch_onchain_table_view(
                 .get("seat_index")
                 .and_then(parse_u32_value)
                 .unwrap_or(0);
-            let stack = player
-                .get("stack")
-                .and_then(parse_i64_value)
-                .unwrap_or(0);
+            let stack = player.get("stack").and_then(parse_i64_value).unwrap_or(0);
             Some((seat, address, stack))
         })
         .collect();
@@ -298,6 +298,9 @@ fn build_session_from_onchain_state(
         rit_shared_board_count: 0,
         mpc_node_progress: Vec::new(),
         mpc_operation_started: None,
+        // Rehydrated sessions have no pinned hashes — they will be re-pinned
+        // on the next deal. No proof generation happens until a new deal starts.
+        pinned_artifact_hashes: HashMap::new(),
     })
 }
 
