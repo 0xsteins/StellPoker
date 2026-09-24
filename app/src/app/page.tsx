@@ -33,6 +33,12 @@ import {
   type TableMatch,
 } from "@/lib/table-search";
 import { loadFriends, displayName, type Friend } from "@/lib/friends";
+import {
+  loadSeatPreference,
+  pickQuickSeatTable,
+  readTableStakes,
+  type SeatPreference,
+} from "@/lib/quick-seat";
 
 type Screen = "splash" | "connect" | "menu" | "create" | "join";
 const STROOPS_PER_XLM = BigInt("10000000");
@@ -85,9 +91,10 @@ export default function Home() {
   const [filterMyStakes, setFilterMyStakes] = useState(false);
   const [oddsCalculatorOpen, setOddsCalculatorOpen] = useState(false);
   const [friends, setFriends] = useState<Friend[]>([]);
+  const [seatPreference, setSeatPreference] = useState<SeatPreference | null>(null);
 
   const joinTableSim = useJoinTableSimulation(wallet, () => {
-    if (pendingTableId) {
+    if (pendingTableId !== null) {
       const query = maxPlayers >= 3 ? "?mode=multi" : "?mode=headsup";
       router.push(`/table/${pendingTableId}${query}`);
       setPendingTableId(null);
@@ -118,6 +125,11 @@ export default function Home() {
   // straight back into one instead of retyping its ID (#72).
   useEffect(() => {
     setOpenTables(wallet ? loadOpenTables(wallet.address) : []);
+  }, [wallet, screen]);
+
+  // The kind of seat this wallet last sat down in, for quick seat (#159).
+  useEffect(() => {
+    setSeatPreference(wallet ? loadSeatPreference(wallet.address) : null);
   }, [wallet, screen]);
 
   // Load the browsable open-tables list when entering the join screen.
@@ -307,6 +319,51 @@ export default function Home() {
       lobby.seats.map((s) => s.chain_address || s.wallet_address || "")
     );
     return friends.filter((f) => seated.has(f.address));
+  };
+
+  // Quick seat (#159): sit a returning player straight down at the open table
+  // that best fits the table size, stakes and seat they last played, joining
+  // through the same buy-in simulation that creating a table uses.
+  const handleQuickSeat = async () => {
+    if (!wallet || !seatPreference) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const sameSize = lobbyTables.filter(
+        (table) =>
+          table.max_players === seatPreference.maxPlayers &&
+          table.open_wallet_slots > 0 &&
+          !isMyTable(table)
+      );
+      // The open-tables list carries no stakes, so read each candidate's
+      // buy-in from its on-chain config.
+      const candidates = await Promise.all(
+        sameSize.map(async (table) => ({
+          tableId: table.table_id,
+          maxPlayers: table.max_players,
+          joinedWallets: table.joined_wallets,
+          stakes: await api
+            .getParsedTableState(table.table_id)
+            .then(({ parsed }) => readTableStakes(parsed))
+            .catch(() => null),
+        }))
+      );
+      const best = pickQuickSeatTable(seatPreference, candidates);
+      if (!best?.stakes) {
+        setError("No open table matches your quick seat preferences");
+        return;
+      }
+      // The simulation's confirm and success handlers read the buy-in and
+      // table size from the form state, so point them at this table.
+      setMaxPlayers(best.maxPlayers);
+      setBuyInXlm(formatStroopsToXlm(best.stakes.buyIn));
+      setPendingTableId(best.tableId);
+      joinTableSim.joinTable(best.tableId, best.stakes.buyIn);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Quick seat failed");
+    } finally {
+      setBusy(false);
+    }
   };
 
   // Each surviving row carries the reason it matched, so the list can show
@@ -779,6 +836,29 @@ export default function Home() {
               JOIN TABLE
             </h2>
 
+            {/* One-click seat for returning players (#159) */}
+            {seatPreference && (
+              <div className="w-full flex flex-col gap-2">
+                <button
+                  onClick={() => void handleQuickSeat()}
+                  disabled={busy || loadingTables || !wallet}
+                  className="pixel-btn pixel-btn-green text-[11px] w-full"
+                  style={{
+                    padding: "12px 24px",
+                    opacity: busy || loadingTables || !wallet ? 0.6 : 1,
+                  }}
+                  data-testid="quick-seat-button"
+                >
+                  {busy ? "SEATING..." : "QUICK SEAT"}
+                </button>
+                <div className="text-[9px] text-center" style={{ color: "#95a5a6" }}>
+                  {seatPreference.maxPlayers === 2 ? "HEADS-UP" : `${seatPreference.maxPlayers}-MAX`}
+                  {" · "}BUY-IN {formatStroopsToXlm(BigInt(seatPreference.buyIn))}
+                  {" · "}SEAT {seatPreference.seatIndex + 1}
+                </div>
+              </div>
+            )}
+
             {/* Tables already open in this browser */}
             {openTables.length > 0 && (
               <div className="w-full flex flex-col gap-2">
@@ -1134,7 +1214,7 @@ export default function Home() {
             loading={joinTableSim.loading}
             buyInAmount={joinTableSim.params?.buyIn}
             onConfirm={() => {
-              if (pendingTableId) {
+              if (pendingTableId !== null) {
                 const buyIn = parseXlmToStroops(buyInXlm);
                 if (buyIn) {
                   joinTableSim.confirmJoin(pendingTableId, buyIn);

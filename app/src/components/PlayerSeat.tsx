@@ -5,6 +5,7 @@ import { Card } from "./Card";
 import { PixelCat, opponentSprite } from "./PixelCat";
 import { PixelChip, AnimatedChipCounter } from "./PixelChip";
 import { Identicon } from "./Identicon";
+import { StackSparkline } from "./StackSparkline";
 import type { Player } from "@/lib/game-state";
 import { classifyHandStrength } from "@/lib/hand-strength";
 import type { HandStrength } from "@/lib/hand-strength";
@@ -31,6 +32,8 @@ interface PlayerSeatProps {
   gamePhase?: string;
   /** Disable HUD stats tooltip (e.g. storybook / bots). */
   showStatsTooltip?: boolean;
+  /** Stack sizes over recent hands, oldest first, for the trend sparkline (#157). */
+  stackTrend?: number[];
 }
 
 function formatPct(n: number): string {
@@ -58,6 +61,7 @@ export function PlayerSeat({
   boardCards = [],
   gamePhase = "",
   showStatsTooltip = true,
+  stackTrend,
 }: PlayerSeatProps) {
   const t = useT();
   const [hud, setHud] = useState<PlayerHudStats | null>(null);
@@ -194,6 +198,7 @@ export function PlayerSeat({
         textShadow: '1px 1px 0 rgba(0,0,0,0.5)',
       }}>
         <span>{displayLabel}</span>
+        {!hideChipStats && stackTrend && <StackSparkline values={stackTrend} />}
         {isDealer && <span style={{ color: '#f1c40f' }}>{t("seat.dealer")}</span>}
         {onEditAlias && (
           <button
