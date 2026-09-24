@@ -196,6 +196,13 @@ async function submitWalletTx(
   return sent.hash || undefined;
 }
 
+/** Runs Table On Chain.
+ * @param wallet - wallet.
+ * @param tableId - table Id.
+ * @param buyIn - buy In.
+ * @returns Promise<string | undefined>.
+ * @remarks Submits/signs a Soroban chain transaction.
+ */
 export async function joinTableOnChain(
   wallet: WalletSession,
   tableId: number,
@@ -208,6 +215,14 @@ export async function joinTableOnChain(
   ]);
 }
 
+/** Runs player Action On Chain.
+ * @param wallet - wallet.
+ * @param tableId - table Id.
+ * @param action - action.
+ * @param amount - amount.
+ * @returns Promise<string | undefined>.
+ * @remarks Submits/signs a Soroban chain transaction.
+ */
 export async function playerActionOnChain(
   wallet: WalletSession,
   tableId: number,

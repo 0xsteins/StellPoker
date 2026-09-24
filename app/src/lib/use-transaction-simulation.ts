@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { SimulationResult } from "@/lib/transaction-simulation";
 import type { WalletSession } from "@/lib/wallet";
 
+/** Transaction Flow shape. */
 export interface TransactionFlow {
   showSimulation: boolean;
   simulation: SimulationResult | null;
@@ -11,6 +12,9 @@ export interface TransactionFlow {
   error: string | null;
 }
 
+/** React hook that manages use Transaction Simulation.
+ * @returns Promise.
+ */
 export function useTransactionSimulation() {
   const [flow, setFlow] = useState<TransactionFlow>({
     showSimulation: false,
@@ -87,6 +91,10 @@ export function useTransactionSimulation() {
 }
 
 // Convenience functions for common transaction types
+/** React hook that manages use Join Table Simulation.
+ * @param wallet - wallet.
+ * @param onSuccess - on Success.
+ */
 export function useJoinTableSimulation(
   wallet: WalletSession | null,
   onSuccess?: () => void
@@ -131,6 +139,10 @@ export function useJoinTableSimulation(
   };
 }
 
+/** React hook that manages use Player Action Simulation.
+ * @param wallet - wallet.
+ * @param onSuccess - on Success.
+ */
 export function usePlayerActionSimulation(
   wallet: WalletSession | null,
   onSuccess?: () => void

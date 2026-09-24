@@ -9,8 +9,10 @@
 import { bestHandRank } from "./hand-rank";
 import type { TimelineEvent } from "./hand-timeline";
 
+/** Street shape. */
 export type Street = "preflop" | "flop" | "turn" | "river";
 
+/** Street Snapshot shape. */
 export interface StreetSnapshot {
   street: Street;
   pot: number;
@@ -32,6 +34,7 @@ export interface HandAction {
   pot: number;
 }
 
+/** Hand History Entry shape. */
 export interface HandHistoryEntry {
   tableId: number;
   handNumber: number;
@@ -130,6 +133,11 @@ function storageKey(tableId: number): string {
   return `${STORAGE_PREFIX}${tableId}`;
 }
 
+/** Loads Hand History.
+ * @param tableId - table Id.
+ * @returns HandHistoryEntry[].
+ * @remarks Reads/writes browser storage.
+ */
 export function loadHandHistory(tableId: number): HandHistoryEntry[] {
   if (typeof window === "undefined") return [];
   try {
@@ -142,6 +150,10 @@ export function loadHandHistory(tableId: number): HandHistoryEntry[] {
   }
 }
 
+/** Persists Hand History Entry.
+ * @param entry - entry.
+ * @remarks Reads/writes browser storage.
+ */
 export function saveHandHistoryEntry(entry: HandHistoryEntry): void {
   if (typeof window === "undefined") return;
   try {
@@ -153,6 +165,11 @@ export function saveHandHistoryEntry(entry: HandHistoryEntry): void {
   }
 }
 
+/** Computes Hand Rank Name.
+ * @param holeCards - hole Cards.
+ * @param boardCards - board Cards.
+ * @returns string | undefined.
+ */
 export function buildHandRankName(
   holeCards: [number, number] | undefined,
   boardCards: number[]

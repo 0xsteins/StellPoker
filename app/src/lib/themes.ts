@@ -1,5 +1,7 @@
+/** THEME STORAGE KEY */
 export const THEME_STORAGE_KEY = "stellpoker-theme";
 
+/** Table Theme shape. */
 export interface TableTheme {
   id: string;
   label: string;
@@ -14,6 +16,7 @@ export interface TableTheme {
   cardBackSymbol: string;
 }
 
+/** THEMES */
 export const THEMES: TableTheme[] = [
   {
     id: "classic-green",
@@ -82,6 +85,10 @@ export const THEMES: TableTheme[] = [
   },
 ];
 
+/** Loads Theme.
+ * @returns TableTheme.
+ * @remarks Reads/writes browser storage.
+ */
 export function loadTheme(): TableTheme {
   if (typeof window === "undefined") return THEMES[0];
   try {
@@ -95,6 +102,10 @@ export function loadTheme(): TableTheme {
   return THEMES[0];
 }
 
+/** Persists Theme.
+ * @param theme - theme.
+ * @remarks Reads/writes browser storage.
+ */
 export function saveTheme(theme: TableTheme): void {
   if (typeof window === "undefined") return;
   try {
@@ -102,6 +113,9 @@ export function saveTheme(theme: TableTheme): void {
   } catch { /* ignore */ }
 }
 
+/** Apply Theme.
+ * @param theme - theme.
+ */
 export function applyTheme(theme: TableTheme): void {
   if (typeof document === "undefined") return;
   const root = document.documentElement;

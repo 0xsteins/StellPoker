@@ -155,6 +155,9 @@ function CardFace({ value, d, className, strength }: { value: number; d: CardDim
   );
 }
 
+/** Renders Card.
+ * @param props(object) - props(object).
+ */
 export function Card({ value, faceDown = false, size = "md", flip = false, flipDelay = 0, dealFrom, strength = null }: CardProps) {
   const d = DIMS[size];
 

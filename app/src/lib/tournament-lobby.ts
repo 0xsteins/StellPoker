@@ -8,9 +8,12 @@
 
 import type { TournamentSummary } from "./tournament";
 
+/** Tournament Sort Key shape. */
 export type TournamentSortKey = "entries" | "prizePool" | "startTime";
+/** Sort Direction shape. */
 export type SortDirection = "asc" | "desc";
 
+/** Tournament Filters shape. */
 export interface TournamentFilters {
   /** Minimum buy-in in stroops (inclusive). */
   buyInMin: number | null;
@@ -27,6 +30,10 @@ export interface TournamentFilters {
   startTimeAfter: number | null;
 }
 
+/** EMPTY FILTERS.
+ * @param t - t.
+ * @returns number.
+ */
 export const EMPTY_FILTERS: TournamentFilters = {
   buyInMin: null,
   buyInMax: null,
@@ -43,6 +50,11 @@ export function sortTimeFor(t: TournamentSummary): number {
   return t.registered;
 }
 
+/** Filter Tournaments.
+ * @param tournaments - tournaments.
+ * @param filters - filters.
+ * @returns TournamentSummary[].
+ */
 export function filterTournaments(
   tournaments: TournamentSummary[],
   filters: TournamentFilters
@@ -64,6 +76,12 @@ export function filterTournaments(
   });
 }
 
+/** Sort Tournaments.
+ * @param tournaments - tournaments.
+ * @param key - key.
+ * @param direction - direction.
+ * @returns TournamentSummary[].
+ */
 export function sortTournaments(
   tournaments: TournamentSummary[],
   key: TournamentSortKey,
@@ -88,12 +106,17 @@ export function sortTournaments(
   });
 }
 
+/** Registration Status shape. */
 export type RegistrationStatus =
   | "open"
   | "full"
   | "in-progress"
   | "closed";
 
+/** Registration Status.
+ * @param t - t.
+ * @returns RegistrationStatus.
+ */
 export function registrationStatus(t: TournamentSummary): RegistrationStatus {
   if (t.status === "registration") {
     return t.registered >= t.max_players ? "full" : "open";
@@ -102,6 +125,10 @@ export function registrationStatus(t: TournamentSummary): RegistrationStatus {
   return "closed";
 }
 
+/** Registration Label.
+ * @param status - status.
+ * @returns string.
+ */
 export function registrationLabel(status: RegistrationStatus): string {
   switch (status) {
     case "open":
@@ -115,6 +142,10 @@ export function registrationLabel(status: RegistrationStatus): string {
   }
 }
 
+/** Registration Color.
+ * @param status - status.
+ * @returns string.
+ */
 export function registrationColor(status: RegistrationStatus): string {
   switch (status) {
     case "open":

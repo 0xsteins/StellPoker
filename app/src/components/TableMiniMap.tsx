@@ -26,6 +26,9 @@ function formatChips(n: number): string {
   return n.toLocaleString();
 }
 
+/** Renders Table Mini Map.
+ * @param props(object) - props(object).
+ */
 export function TableMiniMap({
   currentTableId,
   defaultCollapsed = true,

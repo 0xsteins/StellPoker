@@ -7,6 +7,7 @@
 
 export type AutoRebuyMode = "always_max" | "below_threshold" | "never";
 
+/** Auto Rebuy Preference shape. */
 export interface AutoRebuyPreference {
   mode: AutoRebuyMode;
   /** Only used when mode === "below_threshold": trigger when the stack
@@ -14,6 +15,7 @@ export interface AutoRebuyPreference {
   thresholdBB?: number;
 }
 
+/** Auto Rebuy Context shape. */
 export interface AutoRebuyContext {
   preference: AutoRebuyPreference;
   /** Player's current chip stack at this table. */
@@ -30,6 +32,7 @@ export interface AutoRebuyContext {
   walletBalance: bigint;
 }
 
+/** Auto Rebuy Decision shape. */
 export interface AutoRebuyDecision {
   shouldRebuy: boolean;
   /** Amount to rebuy, in the table's payment token's smallest unit. Always

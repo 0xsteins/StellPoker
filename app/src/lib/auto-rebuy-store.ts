@@ -14,6 +14,12 @@ function storageKey(tableId: number, address: string): string {
 
 const DEFAULT_PREFERENCE: AutoRebuyPreference = { mode: "never" };
 
+/** Loads Auto Rebuy Preference.
+ * @param tableId - table Id.
+ * @param address - address.
+ * @returns AutoRebuyPreference.
+ * @remarks Reads/writes browser storage.
+ */
 export function getAutoRebuyPreference(tableId: number, address: string): AutoRebuyPreference {
   if (typeof window === "undefined") return DEFAULT_PREFERENCE;
   try {
@@ -29,6 +35,12 @@ export function getAutoRebuyPreference(tableId: number, address: string): AutoRe
   }
 }
 
+/** Persists Auto Rebuy Preference.
+ * @param tableId - table Id.
+ * @param address - address.
+ * @param preference - preference.
+ * @remarks Reads/writes browser storage.
+ */
 export function setAutoRebuyPreference(
   tableId: number,
   address: string,

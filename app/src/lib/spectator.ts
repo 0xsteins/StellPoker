@@ -9,6 +9,7 @@
 
 import type { GamePhase } from "./game-state";
 
+/** Spectator Player shape. */
 export interface SpectatorPlayer {
   address: string;
   seat: number;
@@ -18,6 +19,7 @@ export interface SpectatorPlayer {
   allIn: boolean;
 }
 
+/** Spectator View shape. */
 export interface SpectatorView {
   phase: GamePhase;
   rawPhase: string;
@@ -29,6 +31,7 @@ export interface SpectatorView {
   handNumber: number;
 }
 
+/** Spectator Action Kind shape. */
 export type SpectatorActionKind =
   | "new_hand"
   | "street"
@@ -37,6 +40,7 @@ export type SpectatorActionKind =
   | "bet"
   | "check";
 
+/** Spectator Action shape. */
 export interface SpectatorAction {
   kind: SpectatorActionKind;
   handNumber: number;
@@ -149,10 +153,18 @@ export function diffSpectatorActions(
   return actions;
 }
 
+/** Short Seat Address.
+ * @param address - address.
+ * @returns string.
+ */
 export function shortSeatAddress(address: string): string {
   return address.length > 12 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address;
 }
 
+/** Describe Spectator Action.
+ * @param action - action.
+ * @returns string.
+ */
 export function describeSpectatorAction(action: SpectatorAction): string {
   const who = action.address ? shortSeatAddress(action.address) : "";
   switch (action.kind) {
@@ -171,6 +183,10 @@ export function describeSpectatorAction(action: SpectatorAction): string {
   }
 }
 
+/** Computes Spectator Count.
+ * @param count - count.
+ * @returns string.
+ */
 export function formatSpectatorCount(count: number): string {
   return `${count} WATCHING`;
 }

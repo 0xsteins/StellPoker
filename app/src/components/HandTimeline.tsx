@@ -38,6 +38,9 @@ const KIND_COLORS: Record<TimelineEvent["kind"], string> = {
   settlement: "#f1c40f",
 };
 
+/** Renders Hand Timeline.
+ * @param props(object) - props(object).
+ */
 export function HandTimeline({
   events,
   index,

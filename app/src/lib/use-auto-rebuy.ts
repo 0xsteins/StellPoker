@@ -7,6 +7,7 @@ import { getAutoRebuyPreference } from "./auto-rebuy-store";
 import { decideAutoRebuy } from "./auto-rebuy";
 import { getTableConfig, getPlayerRebuyCount, getTokenBalance, rebuyOnChain } from "./onchain";
 
+/** Auto Rebuy Status shape. */
 export type AutoRebuyStatus = "idle" | "checking" | "rebuying" | "error";
 
 interface UseAutoRebuyOptions {

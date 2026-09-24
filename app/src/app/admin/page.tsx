@@ -29,6 +29,7 @@ const ADMIN_WHITELIST = [
   "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFXYSFZUK25QG5W2H2MVM",
 ];
 
+/** Default */
 export default function AdminDashboardPage() {
   const [wallet, setWallet] = useState<WalletSession | null>(null);
   const [loadingWallet, setLoadingWallet] = useState(true);

@@ -15,6 +15,7 @@ import { stellarExpertUrl } from "./explorer";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/** Replay Step shape. */
 export type ReplayStep =
   | { kind: "deal";    holeCards: Record<string, [number, number]>; deckRoot: string; txHash: string | null }
   | { kind: "flop";    cards: [number, number, number]; txHash: string | null }
@@ -24,6 +25,7 @@ export type ReplayStep =
   | { kind: "showdown"; winner: string; holecards: Record<string, [number, number]>; txHash: string | null }
   | { kind: "fold_win"; winner: string; pot: number; txHash: string | null };
 
+/** Replay Hand shape. */
 export interface ReplayHand {
   /** "<table_id>-<hand_number>" */
   id: string;

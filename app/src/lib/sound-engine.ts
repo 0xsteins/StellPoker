@@ -68,6 +68,10 @@ async function ensureRunning(): Promise<AudioContext | null> {
 
 // ── State helpers ────────────────────────────────────────────────────────────
 
+/** Loads Sfx Muted.
+ * @returns boolean.
+ * @remarks Reads/writes browser storage.
+ */
 export function getSfxMuted(): boolean {
   if (typeof window === "undefined") return false;
   // Read from localStorage on first call so pref survives page reload
@@ -76,6 +80,10 @@ export function getSfxMuted(): boolean {
   return _muted;
 }
 
+/** Persists Sfx Muted.
+ * @param muted - muted.
+ * @remarks Reads/writes browser storage.
+ */
 export function setSfxMuted(muted: boolean): void {
   _muted = muted;
   if (typeof window !== "undefined") {
@@ -88,6 +96,10 @@ export function setSfxMuted(muted: boolean): void {
   }
 }
 
+/** Loads Sfx Volume.
+ * @returns number.
+ * @remarks Reads/writes browser storage.
+ */
 export function getSfxVolume(): number {
   if (typeof window !== "undefined") {
     try {
@@ -98,6 +110,10 @@ export function getSfxVolume(): number {
   return _volume;
 }
 
+/** Persists Sfx Volume.
+ * @param v - v.
+ * @remarks Reads/writes browser storage.
+ */
 export function setSfxVolume(v: number): void {
   _volume = Math.max(0, Math.min(1, v));
   if (typeof window !== "undefined") {

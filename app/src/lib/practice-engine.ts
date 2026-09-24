@@ -23,6 +23,7 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/** Practice Phase shape. */
 export type PracticePhase =
   | "waiting"
   | "preflop"
@@ -31,6 +32,7 @@ export type PracticePhase =
   | "river"
   | "settlement";
 
+/** Practice Seat shape. */
 export interface PracticeSeat {
   id: string;
   name: string;
@@ -47,12 +49,14 @@ export interface PracticeSeat {
   hasActed: boolean;
 }
 
+/** Practice Log Entry shape. */
 export interface PracticeLogEntry {
   handNumber: number;
   street: PracticePhase;
   text: string;
 }
 
+/** Practice Payout shape. */
 export interface PracticePayout {
   seatId: string;
   amount: number;
@@ -60,6 +64,7 @@ export interface PracticePayout {
   handName?: string;
 }
 
+/** Practice Config shape. */
 export interface PracticeConfig {
   botCount: number;
   difficulty: Difficulty;
@@ -68,6 +73,7 @@ export interface PracticeConfig {
   bigBlind: number;
 }
 
+/** Practice State shape. */
 export interface PracticeState {
   config: PracticeConfig;
   seats: PracticeSeat[];
@@ -91,8 +97,10 @@ export interface PracticeState {
   rngState: number;
 }
 
+/** HUMAN SEAT ID */
 export const HUMAN_SEAT_ID = "you";
 
+/** DEFAULT PRACTICE CONFIG */
 export const DEFAULT_PRACTICE_CONFIG: PracticeConfig = {
   botCount: 1,
   difficulty: "medium",
@@ -370,6 +378,7 @@ function postBlinds(state: PracticeState): PracticeState {
 
 // ── Legal actions ────────────────────────────────────────────────────────────
 
+/** Legal Actions shape. */
 export interface LegalActions {
   canAct: boolean;
   canCheck: boolean;
@@ -826,6 +835,10 @@ export function isHumanTurn(state: PracticeState): boolean {
   return state.seats[state.toAct]?.id === HUMAN_SEAT_ID;
 }
 
+/** Human Seat.
+ * @param state - state.
+ * @returns PracticeSeat | undefined.
+ */
 export function humanSeat(state: PracticeState): PracticeSeat | undefined {
   return state.seats.find((s) => s.id === HUMAN_SEAT_ID);
 }

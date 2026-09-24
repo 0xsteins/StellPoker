@@ -27,6 +27,7 @@ export interface SearchableSeat {
 /** Why a seat matched — drives the badge shown next to the result row. */
 export type SeatMatchKind = "alias" | "address-prefix" | "address";
 
+/** Seat Match shape. */
 export interface SeatMatch {
   seatIndex: number;
   /** The address that matched (wallet address preferred over chain address). */
@@ -36,6 +37,7 @@ export interface SeatMatch {
   kind: SeatMatchKind;
 }
 
+/** Table Match shape. */
 export interface TableMatch {
   matched: boolean;
   /** True when the query matched the table's own number rather than a seat. */

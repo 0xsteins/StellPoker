@@ -17,6 +17,7 @@ import type { OpenTable } from "./open-tables";
 const STORAGE_PREFIX = "stellpoker:friends:";
 const MAX_ALIAS_LENGTH = 16;
 
+/** Friend shape. */
 export interface Friend {
   /** The friend's Stellar public key. */
   address: string;
@@ -39,6 +40,10 @@ function storageKey(): string {
   return STORAGE_PREFIX.slice(0, -1);
 }
 
+/** Loads Friends.
+ * @returns Friend[].
+ * @remarks Reads/writes browser storage.
+ */
 export function loadFriends(): Friend[] {
   if (typeof window === "undefined") return [];
   try {
@@ -59,6 +64,11 @@ function persist(friends: Friend[]): void {
   }
 }
 
+/** Add Friend.
+ * @param address - address.
+ * @param alias - alias.
+ * @returns Friend[].
+ */
 export function addFriend(address: string, alias?: string): Friend[] {
   const trimmed = (alias ?? "").trim().slice(0, MAX_ALIAS_LENGTH);
   const next = loadFriends();
@@ -74,12 +84,21 @@ export function addFriend(address: string, alias?: string): Friend[] {
   return next;
 }
 
+/** Remove Friend.
+ * @param address - address.
+ * @returns Friend[].
+ */
 export function removeFriend(address: string): Friend[] {
   const next = loadFriends().filter((f) => f.address !== address);
   persist(next);
   return next;
 }
 
+/** Persists Friend Alias.
+ * @param address - address.
+ * @param alias - alias.
+ * @returns Friend[].
+ */
 export function setFriendAlias(address: string, alias: string): Friend[] {
   const next = loadFriends().map((f) =>
     f.address === address
@@ -90,6 +109,11 @@ export function setFriendAlias(address: string, alias: string): Friend[] {
   return next;
 }
 
+/** Clear Invites.
+ * @param address - address.
+ * @param tableId - table Id.
+ * @returns Friend[].
+ */
 export function clearInvites(address: string, tableId: number): Friend[] {
   const next = loadFriends().map((f) =>
     f.address === address ? { ...f, invited: false } : f
@@ -113,6 +137,11 @@ export function markFriendPresence(
   return next;
 }
 
+/** Persists Friend Invited.
+ * @param address - address.
+ * @param invited - invited.
+ * @returns Friend[].
+ */
 export function setFriendInvited(address: string, invited: boolean): Friend[] {
   const next = loadFriends().map((f) =>
     f.address === address ? { ...f, invited } : f
@@ -150,11 +179,19 @@ export function tablesOccupiedBy(
   return map;
 }
 
+/** Short Addr.
+ * @param addr - addr.
+ * @returns string.
+ */
 export function shortAddr(addr: string): string {
   if (!addr || addr.length < 12) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+/** Display Name.
+ * @param friend - friend.
+ * @returns string.
+ */
 export function displayName(friend: Friend): string {
   return friend.alias ?? shortAddr(friend.address);
 }

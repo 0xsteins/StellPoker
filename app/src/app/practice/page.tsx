@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { PracticeTable } from "@/components/PracticeTable";
 
+/** Metadata */
 export const metadata: Metadata = {
   title: "Practice — Poker on Stellar",
   description:

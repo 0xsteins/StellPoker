@@ -17,6 +17,7 @@ export type NotificationType =
   | "tournament-reminder"
   | "achievement";
 
+/** App Notification shape. */
 export interface AppNotification {
   id: string;
   type: NotificationType;
@@ -33,6 +34,10 @@ export interface AppNotification {
 const STORAGE_KEY = "stellpoker:notifications";
 const MAX_NOTIFICATIONS = 100;
 
+/** NOTIFICATION GROUPS.
+ * @param type - type.
+ * @returns string.
+ */
 export const NOTIFICATION_GROUPS: NotificationType[] = [
   "table-invite",
   "friend-request",
@@ -40,6 +45,10 @@ export const NOTIFICATION_GROUPS: NotificationType[] = [
   "achievement",
 ];
 
+/** Group Label.
+ * @param type - type.
+ * @returns string.
+ */
 export function groupLabel(type: NotificationType): string {
   switch (type) {
     case "table-invite":
@@ -53,6 +62,10 @@ export function groupLabel(type: NotificationType): string {
   }
 }
 
+/** Loads Notifications.
+ * @returns AppNotification[].
+ * @remarks Reads/writes browser storage.
+ */
 export function loadNotifications(): AppNotification[] {
   if (typeof window === "undefined") return [];
   try {
@@ -77,6 +90,10 @@ function uid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Push Notification.
+ * @param n - n.
+ * @returns AppNotification[].
+ */
 export function pushNotification(
   n: Omit<AppNotification, "id" | "createdAt" | "read">
 ): AppNotification[] {
@@ -86,12 +103,19 @@ export function pushNotification(
   return next;
 }
 
+/** Mark All Read.
+ * @returns AppNotification[].
+ */
 export function markAllRead(): AppNotification[] {
   const next = loadNotifications().map((n) => ({ ...n, read: true }));
   persist(next);
   return next;
 }
 
+/** Mark Read.
+ * @param id - id.
+ * @returns AppNotification[].
+ */
 export function markRead(id: string): AppNotification[] {
   const next = loadNotifications().map((n) =>
     n.id === id ? { ...n, read: true } : n
@@ -100,17 +124,28 @@ export function markRead(id: string): AppNotification[] {
   return next;
 }
 
+/** Clear Notification.
+ * @param id - id.
+ * @returns AppNotification[].
+ */
 export function clearNotification(id: string): AppNotification[] {
   const next = loadNotifications().filter((n) => n.id !== id);
   persist(next);
   return next;
 }
 
+/** Clear All.
+ * @returns AppNotification[].
+ */
 export function clearAll(): AppNotification[] {
   persist([]);
   return [];
 }
 
+/** Unread Count.
+ * @param items - items.
+ * @returns number.
+ */
 export function unreadCount(items: AppNotification[]): number {
   return items.filter((n) => !n.read).length;
 }

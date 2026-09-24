@@ -25,8 +25,10 @@
 
 import { bestHandRank } from "./hand-rank";
 
+/** Difficulty shape. */
 export type Difficulty = "easy" | "medium" | "hard";
 
+/** Bot Profile shape. */
 export interface BotProfile {
   id: Difficulty;
   /** Shown in the difficulty picker. */
@@ -48,6 +50,7 @@ export interface BotProfile {
   betSizing: number;
 }
 
+/** BOT PROFILES */
 export const BOT_PROFILES: Record<Difficulty, BotProfile> = {
   easy: {
     id: "easy",
@@ -81,6 +84,10 @@ export const BOT_PROFILES: Record<Difficulty, BotProfile> = {
   },
 };
 
+/** DIFFICULTIES.
+ * @param card - card.
+ * @returns number.
+ */
 export const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
 
 // ── Hand strength ────────────────────────────────────────────────────────────
@@ -196,8 +203,10 @@ export interface BotView {
   opponentsLive: number;
 }
 
+/** Bot Action shape. */
 export type BotAction = "fold" | "check" | "call" | "bet" | "raise" | "allin";
 
+/** Bot Decision shape. */
 export interface BotDecision {
   action: BotAction;
   /** Target total bet for this street (bet/raise only). */

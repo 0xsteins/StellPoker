@@ -10,6 +10,7 @@ import { PixelWorld } from "@/components/PixelWorld";
 import { FriendsPanel } from "@/components/FriendsPanel";
 import { trySilentReconnect, type WalletSession } from "@/lib/wallet";
 
+/** Default */
 export default function FriendsPage() {
   const [wallet, setWallet] = useState<WalletSession | null>(null);
 

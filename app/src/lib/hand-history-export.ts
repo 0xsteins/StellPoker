@@ -10,11 +10,13 @@
 import { decodeCard } from "./cards";
 import type { HandHistoryEntry, Street } from "./hand-history";
 
+/** Export Format shape. */
 export type ExportFormat = "json" | "csv";
 
 /** How a masked hole card appears in an export. */
 export const MASKED_CARD = "??";
 
+/** Exported Player shape. */
 export interface ExportedPlayer {
   address: string;
   seat: number;
@@ -23,6 +25,7 @@ export interface ExportedPlayer {
   holeCards: string[];
 }
 
+/** Exported Hand shape. */
 export interface ExportedHand {
   tableId: number;
   handNumber: number;
@@ -46,6 +49,10 @@ export function cardCode(value: number): string {
   return `${rank}${suit[0]}`;
 }
 
+/** Computes to Exported Hand.
+ * @param entry - entry.
+ * @returns ExportedHand.
+ */
 export function toExportedHand(entry: HandHistoryEntry): ExportedHand {
   const hero = entry.heroAddress;
   const yourHoleCards = entry.holeCards ? entry.holeCards.map(cardCode) : null;
@@ -79,6 +86,11 @@ export function toExportedHand(entry: HandHistoryEntry): ExportedHand {
   };
 }
 
+/** Export Hand History Json.
+ * @param entries - entries.
+ * @param now - now.
+ * @returns string.
+ */
 export function exportHandHistoryJson(
   entries: readonly HandHistoryEntry[],
   now: Date = new Date()

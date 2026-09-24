@@ -122,6 +122,7 @@ function SeatView({ seat, index, isTurn, isDealer, revealed, wonAmount }: SeatVi
   );
 }
 
+/** Renders Practice Table */
 export function PracticeTable() {
   const [game, setGame] = useState<PracticeState>(() =>
     // Seeded from the clock so each visit deals differently, while the engine

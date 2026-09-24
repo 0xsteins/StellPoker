@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { OpenTable } from "@/lib/open-tables";
 
+/** Grid Layout shape. */
 export type GridLayout = "auto" | "1x2" | "2x2" | "3x2";
 
 interface TableTilingViewProps {
@@ -14,6 +15,9 @@ interface TableTilingViewProps {
   onClose: () => void;
 }
 
+/** Renders Table Tiling View.
+ * @param props(object) - props(object).
+ */
 export function TableTilingView({
   tables,
   activeTableId,

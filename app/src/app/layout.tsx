@@ -4,6 +4,9 @@ import { I18nProvider } from "@/lib/i18n/context";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { NotificationsCenter } from "@/components/NotificationsCenter";
 
+/** Metadata.
+ * @param Safari - Safari.
+ */
 export const metadata: Metadata = {
   title: "Poker on Stellar",
   description: "Onchain poker with private cards via MPC + ZK proofs on Stellar",
@@ -12,6 +15,7 @@ export const metadata: Metadata = {
 // Ensure the viewport is correctly sized on mobile browsers and that
 // Freighter's in-app browser (Safari/Chrome WebView) doesn't auto-zoom
 // input fields by keeping font-size at 16px minimum (#18).
+/** Viewport */
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
@@ -19,6 +23,9 @@ export const viewport: Viewport = {
   userScalable: false,
 };
 
+/** Default.
+ * @param props(object) - props(object).
+ */
 export default function RootLayout({
   children,
 }: Readonly<{

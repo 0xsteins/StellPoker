@@ -74,6 +74,7 @@ function buildPresets(pot: number, minRaiseTo: number, maxRaiseTo: number): Pres
     });
 }
 
+/** Renders Mobile Action Bar */
 export function MobileActionBar({
   visible,
   isMyTurn,
