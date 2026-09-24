@@ -17,6 +17,13 @@ interface CardProps {
   flip?: boolean;
   /** Stagger delay in seconds applied to the flip animation. */
   flipDelay?: number;
+  /**
+   * Offset (in px, relative to this card's own resting position) the card
+   * slides in from before landing and flipping — simulates dealing from a
+   * deck at the table's center. Only applies when `flip` is set. Defaults
+   * to straight down from directly above (`{ x: 0, y: -60 }`).
+   */
+  dealFrom?: { x: number; y: number };
   /** Hand strength indicator color ring (shown for own hole cards after flop). */
   strength?: HandStrength | null;
 }
@@ -148,7 +155,7 @@ function CardFace({ value, d, className, strength }: { value: number; d: CardDim
   );
 }
 
-export function Card({ value, faceDown = false, size = "md", flip = false, flipDelay = 0, strength = null }: CardProps) {
+export function Card({ value, faceDown = false, size = "md", flip = false, flipDelay = 0, dealFrom, strength = null }: CardProps) {
   const d = DIMS[size];
 
   if (faceDown || value === undefined) {
@@ -165,7 +172,13 @@ export function Card({ value, faceDown = false, size = "md", flip = false, flipD
       <div className="card-responsive inline-block">
         <div
           className="card-flip"
-          style={{ width: `${d.w}px`, height: `${d.h}px`, "--flip-delay": `${flipDelay}s` } as CSSProperties}
+          style={{
+            width: `${d.w}px`,
+            height: `${d.h}px`,
+            "--flip-delay": `${flipDelay}s`,
+            "--deal-x": `${dealFrom?.x ?? 0}px`,
+            "--deal-y": `${dealFrom?.y ?? -60}px`,
+          } as CSSProperties}
         >
           <div className="card-flip-inner">
             <div className="card-flip-face card-flip-back">

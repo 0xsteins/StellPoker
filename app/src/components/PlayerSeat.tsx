@@ -244,8 +244,8 @@ export function PlayerSeat({
       <div className="flex gap-1">
         {player.cards ? (
           <>
-            <Card value={player.cards[0]} size={cardSize} faceDown={!isUser} flip={isUser} strength={handStrength} />
-            <Card value={player.cards[1]} size={cardSize} faceDown={!isUser} flip={isUser} flipDelay={0.08} strength={handStrength} />
+            <Card value={player.cards[0]} size={cardSize} faceDown={!isUser} flip={isUser} dealFrom={{ x: -10, y: -60 }} strength={handStrength} />
+            <Card value={player.cards[1]} size={cardSize} faceDown={!isUser} flip={isUser} flipDelay={0.08} dealFrom={{ x: 10, y: -60 }} strength={handStrength} />
           </>
         ) : (
           <>
