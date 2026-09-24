@@ -13,6 +13,7 @@ An ADR captures a significant architectural decision: the context that led to it
 | [ADR-003](ADR-003-soroban-over-evm.md) | Soroban (Stellar) over EVM | Accepted |
 | [ADR-004](ADR-004-conoir-framework.md) | coNoir (TACEO) as the MPC Framework | Accepted |
 | [ADR-005](ADR-005-committee-node-topology.md) | 3-Node REP3 Committee Topology | Accepted |
+| [ADR-006](ADR-006-upgrade-governance-timelock-multisig.md) | Timelock + Multi-Sig Gated Contract Upgrades | Accepted |
 
 ## Format
 

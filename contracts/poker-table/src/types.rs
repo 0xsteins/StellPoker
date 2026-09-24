@@ -423,6 +423,15 @@ pub enum PokerTableError {
     RunItTwiceNotEnabled = 48,
     RitAlreadyActive = 49,
     BoardAlreadyRevealedForRun = 50,
+    JackpotNotConfigured = 45,
+    BadBeatHandDataInvalid = 46,
+    // Governance (Issue #504): timelock + multi-sig gated upgrades.
+    NotAnUpgradeSigner = 51,
+    NotEnoughUpgradeApprovals = 52,
+    UpgradeTimelockPending = 53,
+    NoPendingUpgrade = 54,
+    InvalidGovernanceConfig = 55,
+    UpgradeAlreadyApproved = 56,
     JackpotNotConfigured = 51,
     BadBeatHandDataInvalid = 52,
     StaleActionSequence = 53,
@@ -649,6 +658,21 @@ pub struct HandHistoryMeta {
     pub total_archived: u32,
 }
 
+/// A contract upgrade proposed through the governance path (Issue #504).
+///
+/// `addr(env)`s of the `signers` who already approved are appended by
+/// `propose_upgrade`. The upgrade only executes once `approvals.len()` reaches
+/// the configured threshold AND the current ledger is at least
+/// `started_ledger + delay_ledgers` (the per-network timelock).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingUpgrade {
+    /// WASM hash the upgrade targets.
+    pub wasm_hash: BytesN<32>,
+    /// Signers who have approved so far (base64-encoded public keys).
+    pub approvals: Vec<Address>,
+    /// Ledger sequence the proposal was first opened on.
+    pub started_ledger: u32,
 /// Cumulative winner distribution used to detect unusually concentrated table
 /// outcomes. Counts are indexed by seat.
 #[contracttype]
@@ -811,6 +835,16 @@ pub enum DataKey {
     HandHistoryMeta(u32),
     /// Tables a wallet is currently seated at, for multi-table clients.
     PlayerTables(Address),
+    /// Upgrade-governance signer set (Issue #504).
+    UpgradeSigners(u32),
+    /// N-of-M upgrade threshold (Issue #504).
+    UpgradeThreshold(u32),
+    /// Timelock delay in ledgers before an approved upgrade may execute (Issue #504).
+    UpgradeDelay(u32),
+    /// Open upgrade proposal (Issue #504).
+    PendingUpgrade(u32),
+    /// Most recent on-chain chip-dumping evidence report (Issue #506).
+    ChipDumpingReport(u32),
     /// Per-player per-table monotonically increasing action sequence counter.
     /// Used to reject stale or replayed betting actions.
     PlayerActionCounter(u32, Address),

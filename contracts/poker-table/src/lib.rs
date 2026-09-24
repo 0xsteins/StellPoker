@@ -17,6 +17,7 @@ mod game;
 mod game_hub;
 #[cfg(test)]
 mod gas_regression_test;
+mod governance;
 mod hand_cancellation;
 mod history;
 #[cfg(test)]
@@ -1978,6 +1979,13 @@ impl PokerTableContract {
         Ok(())
     }
 
+    /// Upgrade the contract WASM (admin only).
+    ///
+    /// When upgrade governance is configured for the table (Issue #504), this
+    /// call requires a fully-approved and time-locked proposal matching
+    /// `new_wasm_hash` — it is equivalent to `execute_upgrade`. Tables that
+    /// predate governance keep the original single-admin behaviour.
+    pub fn upgrade(
     /// Propose a contract-wasm upgrade (admin only). The upgrade can only be
     /// executed after `delay_seconds` have elapsed (minimum
     /// `MIN_UPGRADE_DELAY_SECONDS`), giving seated players a window to
@@ -1989,7 +1997,90 @@ impl PokerTableContract {
         delay_seconds: u64,
     ) -> Result<(), PokerTableError> {
         let table = load_table(&env, table_id)?;
+        if !governance::governance_configured(&env, table_id) {
+            // Legacy path: any table admin may push a wasm upgrade directly.
+            table.admin.require_auth();
+            env.deployer().update_current_contract_wasm(new_wasm_hash);
+            return Ok(());
+        }
+
+        Self::execute_upgrade_with(env, table_id, new_wasm_hash)
+    }
+
+    /// Configure N-of-M upgrade governance for a table (admin only).
+    ///
+    /// `signers` is the full M-signer set, `threshold` is the N approvals
+    /// required, and `delay_ledgers` is the per-network timelock before an
+    /// approved upgrade may execute. Reconfiguration resets the signer set as
+    /// well as the threshold/delay; any open proposal remains untouched.
+    pub fn configure_upgrade_governance(
+        env: Env,
+        table_id: u32,
+        admin: Address,
+        signers: Vec<Address>,
+        threshold: u32,
+        delay_ledgers: u32,
+    ) -> Result<(), PokerTableError> {
+        let table = load_table(&env, table_id)?;
         table.admin.require_auth();
+        admin.require_auth();
+        governance::validate_governance_config(&env, &signers, threshold, delay_ledgers)?;
+        governance::store_governance_config(&env, table_id, signers, threshold, delay_ledgers);
+
+        env.events().publish(
+            (Symbol::new(&env, "governance_configured"), table_id),
+            (threshold, delay_ledgers),
+        );
+        Ok(())
+    }
+
+    /// Propose (and sign) an upgrade to `wasm_hash`.
+    ///
+    /// Only a configured signer may call this. Returns the number of distinct
+    /// approvals collected so far for the proposal.
+    pub fn propose_upgrade(
+        env: Env,
+        table_id: u32,
+        signer: Address,
+        wasm_hash: BytesN<32>,
+    ) -> Result<u32, PokerTableError> {
+        signer.require_auth();
+        if !governance::governance_configured(&env, table_id) {
+            return Err(PokerTableError::InvalidGovernanceConfig);
+        }
+        let approvals = governance::propose_upgrade(&env, table_id, &signer, wasm_hash.clone())?;
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_proposed"), table_id),
+            (wasm_hash, approvals),
+        );
+        Ok(approvals)
+    }
+
+    /// Execute the pending upgrade once it is fully approved and its timelock
+    /// has elapsed. No arguments — the target is taken from the proposal.
+    pub fn execute_upgrade(env: Env, table_id: u32) -> Result<(), PokerTableError> {
+        if !governance::governance_configured(&env, table_id) {
+            return Err(PokerTableError::InvalidGovernanceConfig);
+        }
+        let pending = governance::load_pending(&env, table_id)?;
+        Self::execute_upgrade_with(env, table_id, pending.wasm_hash)
+    }
+
+    /// Shared tail for `upgrade` / `execute_upgrade`: enforce threshold +
+    /// timelock, apply the WASM update, then clear the pending proposal.
+    fn execute_upgrade_with(
+        env: Env,
+        table_id: u32,
+        wasm_hash: BytesN<32>,
+    ) -> Result<(), PokerTableError> {
+        let pending = governance::can_execute(&env, table_id, &wasm_hash)?;
+        env.deployer().update_current_contract_wasm(wasm_hash.clone());
+        governance::clear_pending(&env, table_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_executed"), table_id),
+            pending.wasm_hash,
 
         if delay_seconds < MIN_UPGRADE_DELAY_SECONDS {
             return Err(PokerTableError::UpgradeDelayTooShort);
@@ -2067,6 +2158,57 @@ impl PokerTableContract {
         Ok(())
     }
 
+    /// View current upgrade-governance settings for a table.
+    pub fn get_upgrade_governance(env: Env, table_id: u32) -> (Vec<Address>, u32, u32) {
+        (
+            governance::load_signers(&env, table_id),
+            env.storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::UpgradeThreshold(table_id))
+                .unwrap_or(0),
+            env.storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::UpgradeDelay(table_id))
+                .unwrap_or(0),
+        )
+    }
+
+    /// Read the pending upgrade proposal for a table, if any.
+    pub fn get_pending_upgrade(
+        env: Env,
+        table_id: u32,
+    ) -> Result<PendingUpgrade, PokerTableError> {
+        governance::load_pending(&env, table_id)
+    }
+
+    /// Cancel an open upgrade proposal. Any signer may cancel; the admin may
+    /// always cancel.
+    pub fn cancel_pending_upgrade(
+        env: Env,
+        table_id: u32,
+        caller: Address,
+    ) -> Result<(), PokerTableError> {
+        let table = load_table(&env, table_id)?;
+        caller.require_auth();
+        let signers = governance::load_signers(&env, table_id);
+        let is_signature = {
+            let mut yes = false;
+            for i in 0..signers.len() {
+                if let Some(s) = signers.get(i) {
+                    if constant_time::address_eq(&env, &s, &caller) {
+                        yes = true;
+                        break;
+                    }
+                }
+            }
+            yes
+        };
+        if !is_signature && constant_time::address_ne(&env, &caller, &table.admin) {
+            return Err(PokerTableError::NotAnUpgradeSigner);
+        }
+        governance::clear_pending(&env, table_id);
+        env.events()
+            .publish((Symbol::new(&env, "upgrade_cancelled"), table_id), caller);
     /// Fast, no-timelock rollback of the most recently *executed* upgrade
     /// (issue #348). Intended for a canary/gradual-rollout process to call
     /// automatically when the new code's error rate exceeds a threshold
