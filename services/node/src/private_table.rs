@@ -13,6 +13,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const DECK_SIZE: usize = 52;
 const MAX_PLAYERS: usize = 6;
@@ -26,7 +27,7 @@ pub struct PrivateTableState {
     pending_share_sets: HashMap<String, HashMap<u32, String>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Zeroize, ZeroizeOnDrop)]
 struct PartyContribution {
     permutation: Vec<u32>,
     salts: Vec<String>,
@@ -71,7 +72,7 @@ pub async fn prepare_deal(
         .as_ref()
         .ok_or("missing local party contribution")?;
 
-    let input_toml = build_deal_partial_toml(node_id, contribution, players.len() as u32);
+    let input_toml = Zeroizing::new(build_deal_partial_toml(node_id, contribution, players.len() as u32));
     let share_data_by_party = split_partial_input(circuit_dir, "deal_valid", &input_toml).await?;
 
     let share_set_id = new_share_set_id(table_id);
@@ -115,13 +116,13 @@ pub async fn prepare_reveal(
         .as_ref()
         .ok_or_else(|| format!("table {} has no active deal contribution", table_id))?;
 
-    let input_toml = build_reveal_partial_toml(
+    let input_toml = Zeroizing::new(build_reveal_partial_toml(
         node_id,
         contribution,
         num_revealed,
         previously_used_indices,
         deck_root,
-    )?;
+    )?);
     let share_data_by_party =
         split_partial_input(circuit_dir, "reveal_board_valid", &input_toml).await?;
 
@@ -175,14 +176,14 @@ pub async fn prepare_showdown(
         .as_ref()
         .ok_or_else(|| format!("table {} has no active deal contribution", table_id))?;
 
-    let input_toml = build_showdown_partial_toml(
+    let input_toml = Zeroizing::new(build_showdown_partial_toml(
         node_id,
         contribution,
         board_indices,
         num_active_players,
         hand_commitments,
         deck_root,
-    )?;
+    )?);
     let share_data_by_party =
         split_partial_input(circuit_dir, "showdown_valid", &input_toml).await?;
 
