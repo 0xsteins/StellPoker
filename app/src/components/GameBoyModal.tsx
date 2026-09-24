@@ -250,6 +250,9 @@ interface GameBoyModalProps {
   onLogout: () => void;
 }
 
+/** Renders Game Boy Button.
+ * @param props(object) - props(object).
+ */
 export function GameBoyButton({ onClick }: { onClick: () => void }) {
   return (
     <button
@@ -270,6 +273,9 @@ export function GameBoyButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/** Renders Game Boy Modal.
+ * @param props(object) - props(object).
+ */
 export function GameBoyModal({ open, onClose, onLogout }: GameBoyModalProps) {
   const router = useRouter();
   const t = useT();

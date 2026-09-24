@@ -31,6 +31,9 @@ interface Props {
   seatedAt?: (tableId: number) => string[];
 }
 
+/** Renders Friends Panel.
+ * @param props(object) - props(object).
+ */
 export function FriendsPanel({ wallet, tables, seatedAt }: Props) {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [openTables, setOpenTables] = useState<OpenTable[]>([]);

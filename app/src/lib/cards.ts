@@ -3,9 +3,12 @@ const RANKS = [
   "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A",
 ] as const;
 
+/** Suit shape. */
 export type Suit = (typeof SUITS)[number];
+/** Rank shape. */
 export type Rank = (typeof RANKS)[number];
 
+/** Card Info shape. */
 export interface CardInfo {
   value: number;
   suit: Suit;
@@ -15,6 +18,10 @@ export interface CardInfo {
   color: "red" | "black";
 }
 
+/** Computes Card.
+ * @param value - value.
+ * @returns CardInfo.
+ */
 export function decodeCard(value: number): CardInfo {
   const suit = SUITS[Math.floor(value / 13)];
   const rank = RANKS[value % 13];
@@ -35,6 +42,9 @@ export function decodeCard(value: number): CardInfo {
   };
 }
 
+/** Card Back.
+ * @returns string.
+ */
 export function cardBack(): string {
   return "?";
 }

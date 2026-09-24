@@ -23,6 +23,7 @@ interface ActionPanelProps {
   setBetAmount: (amount: number) => void;
 }
 
+/** Renders Action Panel */
 export function ActionPanel({
   phase,
   isMyTurn,

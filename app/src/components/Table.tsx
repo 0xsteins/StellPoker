@@ -129,6 +129,9 @@ function mapOnChainPhase(phase: string): GamePhase | null {
   }
 }
 
+/** Renders Table.
+ * @param props(object) - props(object).
+ */
 export function Table({ tableId, initialPlayMode }: TableProps) {
   const router = useRouter();
   const t = useT();

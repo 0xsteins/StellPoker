@@ -19,6 +19,9 @@ const MODE_LABELS: Record<AutoRebuyMode, string> = {
 
 const DEFAULT_THRESHOLD_BB = 20;
 
+/** Renders Auto Rebuy Settings.
+ * @param props(object) - props(object).
+ */
 export function AutoRebuySettings({ open, onClose, tableId, address }: AutoRebuySettingsProps) {
   const [mode, setMode] = useState<AutoRebuyMode>(
     () => getAutoRebuyPreference(tableId, address).mode

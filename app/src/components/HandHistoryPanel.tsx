@@ -59,6 +59,9 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
+/** Renders Hand History Panel.
+ * @param props(object) - props(object).
+ */
 export function HandHistoryPanel({ open, onClose, entries, onReplay }: HandHistoryPanelProps) {
   if (!open) return null;
 

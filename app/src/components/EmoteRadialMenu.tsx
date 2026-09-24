@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
+/** Emote Item shape. */
 export interface EmoteItem {
   id: string;
   icon: string;
@@ -9,6 +10,7 @@ export interface EmoteItem {
   keyNumber: string;
 }
 
+/** Renders RADIAL EMOTES */
 export const RADIAL_EMOTES: EmoteItem[] = [
   { id: "nice-hand", icon: "👏", label: "Nice hand!", keyNumber: "1" },
   { id: "unlucky", icon: "💔", label: "Unlucky", keyNumber: "2" },
@@ -28,6 +30,9 @@ interface EmoteRadialMenuProps {
   anchorPosition?: { x: number; y: number };
 }
 
+/** Renders Emote Radial Menu.
+ * @param props(object) - props(object).
+ */
 export function EmoteRadialMenu({
   isOpen,
   onClose,

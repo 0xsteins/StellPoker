@@ -9,6 +9,7 @@ import {
   playSound,
 } from "@/lib/sound-engine";
 
+/** Renders Audio Controls */
 export function AudioControls() {
   const [muted, setMutedState] = useState<boolean>(false);
   const [volume, setVolumeState] = useState<number>(0.55);

@@ -1,3 +1,4 @@
+/** Game Phase shape. */
 export type GamePhase =
   | "waiting"
   | "dealing"
@@ -12,6 +13,7 @@ export type GamePhase =
   | "showdown_run2"
   | "rit_settlement";
 
+/** Player shape. */
 export interface Player {
   address: string;
   seat: number;
@@ -22,6 +24,7 @@ export interface Player {
   cards?: [number, number];
 }
 
+/** Rit State shape. */
 export interface RitState {
   active: boolean;
   player1Seat: number;
@@ -36,6 +39,7 @@ export interface RitState {
   run2Winner: number;
 }
 
+/** Game State shape. */
 export interface GameState {
   tableId: number;
   phase: GamePhase;
@@ -52,6 +56,10 @@ export interface GameState {
   ritState?: RitState;
 }
 
+/** Creates Initial State.
+ * @param tableId - table Id.
+ * @returns GameState.
+ */
 export function createInitialState(tableId: number): GameState {
   return {
     tableId,

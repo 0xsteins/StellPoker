@@ -21,8 +21,10 @@ export type TimelineStreet =
   | "showdown"
   | "settlement";
 
+/** Timeline Kind shape. */
 export type TimelineKind = "deal" | "street" | "action" | "settlement";
 
+/** Timeline Event shape. */
 export interface TimelineEvent {
   /** Stable identity, so a re-render or a repeated poll can't duplicate it. */
   id: string;

@@ -9,8 +9,14 @@ export interface ProofPanelPrefs {
   collapsed: boolean;
 }
 
+/** PROOF PANEL MIN WIDTH */
 export const PROOF_PANEL_MIN_WIDTH = 240;
+/** PROOF PANEL MAX WIDTH */
 export const PROOF_PANEL_MAX_WIDTH = 560;
+/** PROOF PANEL DEFAULT WIDTH.
+ * @param width - width.
+ * @returns number.
+ */
 export const PROOF_PANEL_DEFAULT_WIDTH = 320;
 
 const STORAGE_KEY = "stellpoker:proof-panel";
@@ -20,11 +26,20 @@ const DEFAULT_PREFS: ProofPanelPrefs = {
   collapsed: false,
 };
 
+/** Clamp Panel Width.
+ * @param width - width.
+ * @returns number.
+ * @remarks Reads/writes browser storage.
+ */
 export function clampPanelWidth(width: number): number {
   if (!Number.isFinite(width)) return PROOF_PANEL_DEFAULT_WIDTH;
   return Math.round(Math.min(PROOF_PANEL_MAX_WIDTH, Math.max(PROOF_PANEL_MIN_WIDTH, width)));
 }
 
+/** Loads Proof Panel Prefs.
+ * @returns ProofPanelPrefs.
+ * @remarks Reads/writes browser storage.
+ */
 export function loadProofPanelPrefs(): ProofPanelPrefs {
   if (typeof window === "undefined") return DEFAULT_PREFS;
   try {
@@ -41,6 +56,10 @@ export function loadProofPanelPrefs(): ProofPanelPrefs {
   }
 }
 
+/** Persists Proof Panel Prefs.
+ * @param prefs - prefs.
+ * @remarks Reads/writes browser storage.
+ */
 export function saveProofPanelPrefs(prefs: ProofPanelPrefs): void {
   if (typeof window === "undefined") return;
   try {

@@ -14,6 +14,9 @@
 
 import type { HandHistoryEntry } from "./hand-history";
 
+/** STROOPS PER XLM.
+ * @param won - won.
+ */
 export const STROOPS_PER_XLM = 10_000_000;
 
 /** A single point on the performance-over-time graph. */
@@ -28,6 +31,7 @@ export interface PerformancePoint {
   cumulativeNetStroops: number;
 }
 
+/** Player Dashboard Stats shape. */
 export interface PlayerDashboardStats {
   /** Total number of completed hands recorded for the player. */
   totalHands: number;

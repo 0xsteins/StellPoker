@@ -70,6 +70,10 @@ function SimulationStatus({ success, error }: { success: boolean; error?: string
   );
 }
 
+/** Renders Transaction Simulation.
+ * @param props(object) - props(object).
+ * @returns BigInt(0).
+ */
 export function TransactionSimulation({
   simulation,
   onConfirm,

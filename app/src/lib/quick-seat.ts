@@ -43,6 +43,11 @@ function storageKey(address: string): string {
   return `${STORAGE_PREFIX}${address}`;
 }
 
+/** Loads Seat Preference.
+ * @param address - address.
+ * @returns SeatPreference | null.
+ * @remarks Reads/writes browser storage.
+ */
 export function loadSeatPreference(address: string): SeatPreference | null {
   if (typeof window === "undefined" || !address) return null;
   try {
@@ -68,6 +73,11 @@ export function loadSeatPreference(address: string): SeatPreference | null {
   }
 }
 
+/** Persists Seat Preference.
+ * @param address - address.
+ * @param preference - preference.
+ * @remarks Reads/writes browser storage.
+ */
 export function saveSeatPreference(address: string, preference: SeatPreference): void {
   if (typeof window === "undefined" || !address) return;
   try {

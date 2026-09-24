@@ -25,6 +25,7 @@ import {
   type PlayerDashboardStats,
 } from "@/lib/player-stats";
 
+/** Default */
 export default function PlayerDashboardPage() {
   const [wallet, setWallet] = useState<WalletSession | null>(null);
   const [stats, setStats] = useState<PlayerDashboardStats | null>(null);

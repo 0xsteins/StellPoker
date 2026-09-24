@@ -640,6 +640,7 @@ function FilterToolbar({
 
 // ── Main lobby page ───────────────────────────────────────────────────────────
 
+/** Default */
 export default function TournamentsPage() {
   const [tournaments, setTournaments] = useState<TournamentSummary[]>([]);
   const [selected, setSelected] = useState<TournamentDetail | null>(null);

@@ -7,9 +7,12 @@
 import en from "./messages/en.json";
 import es from "./messages/es.json";
 
+/** Locale shape. */
 export type Locale = "en" | "es";
 
+/** LOCALES */
 export const LOCALES: Locale[] = ["en", "es"];
+/** DEFAULT LOCALE */
 export const DEFAULT_LOCALE: Locale = "en";
 const STORAGE_KEY = "stellpoker.locale";
 
@@ -24,6 +27,7 @@ type NestedKeyOf<T, Prefix extends string = ""> = T extends object
     }[keyof T & string]
   : never;
 
+/** Message Key shape. */
 export type MessageKey = NestedKeyOf<Dict>;
 
 function getByPath(obj: unknown, path: string): string | undefined {
@@ -71,6 +75,10 @@ export function detectBrowserLocale(): Locale {
   return DEFAULT_LOCALE;
 }
 
+/** Loads Stored Locale.
+ * @returns Locale | null.
+ * @remarks Reads/writes browser storage.
+ */
 export function loadStoredLocale(): Locale | null {
   if (typeof window === "undefined") return null;
   try {
@@ -82,6 +90,10 @@ export function loadStoredLocale(): Locale | null {
   return null;
 }
 
+/** Persists Locale.
+ * @param locale - locale.
+ * @remarks Reads/writes browser storage.
+ */
 export function storeLocale(locale: Locale): void {
   if (typeof window === "undefined") return;
   try {

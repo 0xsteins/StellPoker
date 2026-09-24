@@ -3,6 +3,7 @@ import { bestHandRank, type HandRank } from "./hand-rank";
 /** Same 0-51 card encoding as cards.ts / hand-rank.ts: value = suit * 13 + rankIndex. */
 export type CardValue = number;
 
+/** Odds Calculator Input shape. */
 export interface OddsCalculatorInput {
   /** The player's two hole cards. */
   holeCards: [CardValue, CardValue];
@@ -14,6 +15,7 @@ export interface OddsCalculatorInput {
   iterations?: number;
 }
 
+/** Odds Result shape. */
 export interface OddsResult {
   /** Fraction of trials the hero's hand was strictly best (0-1). */
   win: number;
@@ -50,6 +52,7 @@ function shuffle<T>(items: T[]): T[] {
   return arr;
 }
 
+/** Odds Calculator Error class. */
 export class OddsCalculatorError extends Error {}
 
 function validateInput(input: OddsCalculatorInput): void {

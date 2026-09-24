@@ -13,6 +13,9 @@ interface LanguageSelectorProps {
   variant?: "header" | "settings";
 }
 
+/** Renders Language Selector.
+ * @param props(object) - props(object).
+ */
 export function LanguageSelector({ variant = "header" }: LanguageSelectorProps) {
   const { locale, setLocale, t } = useI18n();
 

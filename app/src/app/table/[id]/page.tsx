@@ -6,6 +6,9 @@ import { Table } from "@/components/Table";
 import { PixelWorld } from "@/components/PixelWorld";
 import { SpectatorTable } from "@/components/SpectatorTable";
 
+/** Default.
+ * @param props(object) - props(object).
+ */
 export default function TablePage({
   params,
 }: {

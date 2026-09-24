@@ -28,6 +28,9 @@ export function getMasterVolume(): number {
   return sharedAudioState?.masterVolume ?? 1;
 }
 
+/** Persists Master Volume.
+ * @param v - v.
+ */
 export function setMasterVolume(v: number): void {
   if (!sharedAudioState) return;
   sharedAudioState.masterVolume = Math.max(0, Math.min(1, v));
@@ -60,6 +63,9 @@ function ensureSharedAudioState(): SharedAudioState {
   return sharedAudioState;
 }
 
+/** Renders Pixel World.
+ * @param props(object) - props(object).
+ */
 export function PixelWorld({ children }: { children: React.ReactNode }) {
   const [isNight, setIsNight] = useState(() => sharedAudioState?.isNight ?? false);
   const dayAudioRef = useRef<HTMLAudioElement | null>(null);

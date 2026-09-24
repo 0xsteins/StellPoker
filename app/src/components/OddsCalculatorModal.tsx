@@ -82,6 +82,10 @@ function formatPct(fraction: number): string {
   return `${(fraction * 100).toFixed(1)}%`;
 }
 
+/** Renders Odds Calculator Modal.
+ * @param props(object) - props(object).
+ * @returns v is CardValue.
+ */
 export function OddsCalculatorModal({ open, onClose }: OddsCalculatorModalProps) {
   const [hole1, setHole1] = useState<CardSelection>(null);
   const [hole2, setHole2] = useState<CardSelection>(null);

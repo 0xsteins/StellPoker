@@ -30,6 +30,9 @@ const I18nContext = createContext<I18nContextValue>({
   t: (key, vars) => translate(DEFAULT_LOCALE, key, vars),
 });
 
+/** Renders I18n Provider.
+ * @param props(object) - props(object).
+ */
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(DEFAULT_LOCALE);
   const [ready, setReady] = useState(false);
@@ -65,10 +68,14 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
+/** React hook that manages use I18n.
+ * @returns I18nContextValue.
+ */
 export function useI18n(): I18nContextValue {
   return useContext(I18nContext);
 }
 
+/** React hook that manages use T */
 export function useT() {
   return useI18n().t;
 }

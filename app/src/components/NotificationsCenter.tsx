@@ -21,6 +21,7 @@ import {
   type AppNotification,
 } from "@/lib/notifications-center";
 
+/** Renders Notifications Center */
 export function NotificationsCenter() {
   const [open, setOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);

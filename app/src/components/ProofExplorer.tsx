@@ -166,6 +166,7 @@ function PhaseRow({ phase, status = "pending", txHash, proofSize }: PhaseRowProp
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+/** Proof Explorer Data shape. */
 export interface ProofExplorerData {
   dealTxHash?: string;
   revealTxHashes?: Record<string, string>;
@@ -176,6 +177,10 @@ interface ProofExplorerProps {
   data?: ProofExplorerData;
 }
 
+/** Renders Proof Explorer.
+ * @param props(object) - props(object).
+ * @returns string | undefined.
+ */
 export function ProofExplorer({ data }: ProofExplorerProps) {
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
 

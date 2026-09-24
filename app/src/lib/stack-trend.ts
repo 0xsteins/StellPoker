@@ -11,6 +11,7 @@
 /** How many hands of history each sparkline shows. */
 export const STACK_TREND_HANDS = 10;
 
+/** Stack Point shape. */
 export interface StackPoint {
   handNumber: number;
   stack: number;
@@ -83,6 +84,11 @@ export function sparklinePoints(
   }));
 }
 
+/** Loads Stack Trends.
+ * @param tableId - table Id.
+ * @returns StackTrends.
+ * @remarks Reads/writes browser storage.
+ */
 export function loadStackTrends(tableId: number): StackTrends {
   if (typeof window === "undefined") return {};
   try {
@@ -97,6 +103,11 @@ export function loadStackTrends(tableId: number): StackTrends {
   }
 }
 
+/** Persists Stack Trends.
+ * @param tableId - table Id.
+ * @param trends - trends.
+ * @remarks Reads/writes browser storage.
+ */
 export function saveStackTrends(tableId: number, trends: StackTrends): void {
   if (typeof window === "undefined") return;
   try {

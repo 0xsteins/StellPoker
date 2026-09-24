@@ -51,6 +51,9 @@ interface PokerActionsConfig {
   hydrateMyCards: (auth: WalletSession) => Promise<void>;
 }
 
+/** React hook that manages use Poker Actions.
+ * @param config - config.
+ */
 export function usePokerActions(config: PokerActionsConfig) {
   const {
     tableId,

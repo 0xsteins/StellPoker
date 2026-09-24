@@ -23,6 +23,9 @@ function canShareFiles(file: File): boolean {
   );
 }
 
+/** Renders Hand Share Button.
+ * @param props(object) - props(object).
+ */
 export function HandShareButton({ entry }: HandShareButtonProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);

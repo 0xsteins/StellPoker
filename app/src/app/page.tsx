@@ -66,6 +66,7 @@ function formatStroopsToXlm(value: bigint): string {
   return trimmedFraction ? `${whole}.${trimmedFraction}` : whole.toString();
 }
 
+/** Default */
 export default function Home() {
   const router = useRouter();
   const [screen, setScreen] = useState<Screen>("splash");
