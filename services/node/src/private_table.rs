@@ -306,6 +306,7 @@ pub async fn dispatch_share_payloads(
         let url = format!("{}/session/{}/shares", endpoint, proof_session_id);
         let circuit_name = circuit_name.to_string();
         let client = client.clone();
+        let nonce = rand::random::<u64>();
         let handle = tokio::spawn(async move {
             let response = client
                 .post(&url)
@@ -314,6 +315,7 @@ pub async fn dispatch_share_payloads(
                     "share_data": share_data,
                     "source_party_id": source_party_id,
                     "total_parties": total_parties,
+                    "nonce": nonce,
                 }))
                 .send()
                 .await

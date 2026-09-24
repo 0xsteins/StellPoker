@@ -342,6 +342,8 @@ struct AppState {
     /// Committee registry mapping MPC node id -> trusted Stellar address,
     /// used to verify node identity and signed session messages (Issue #237).
     committee_registry: mpc_identity::CommitteeRegistry,
+    /// Replay protection tracker for MPC session messages (Issue #500).
+    mpc_nonce_tracker: mpc_identity::SessionNonceTracker,
 }
 
 #[derive(Clone)]
@@ -777,6 +779,7 @@ async fn main() {
         node_benchmark_store,
         partition_store,
         committee_registry,
+        mpc_nonce_tracker: mpc_identity::SessionNonceTracker::new(),
     };
     idempotency::spawn_gc_task(state.idempotency_store.clone());
     rate_limit::spawn_rate_alert_task(state.rejection_counter.clone());
@@ -1805,10 +1808,14 @@ async fn verify_node_identity(
     State(state): State<AppState>,
     Json(msg): Json<mpc_identity::SignedSessionMessage>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
-    mpc_identity::verify_session_message(&state.committee_registry, &msg)
-        .await
-        .map(|_| axum::http::StatusCode::NO_CONTENT)
-        .map_err(|e| (axum::http::StatusCode::UNAUTHORIZED, e))
+    mpc_identity::verify_session_message_with_tracker(
+        &state.committee_registry,
+        &msg,
+        Some(&state.mpc_nonce_tracker),
+    )
+    .await
+    .map(|_| axum::http::StatusCode::NO_CONTENT)
+    .map_err(|e| (axum::http::StatusCode::UNAUTHORIZED, e))
 }
 
 /// GET /api/leader

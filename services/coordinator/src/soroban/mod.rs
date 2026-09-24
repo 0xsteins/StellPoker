@@ -6,9 +6,11 @@
 
 mod actions;
 mod proofs;
+pub mod threshold_signing;
 
 pub use actions::*;
 pub use proofs::*;
+pub use threshold_signing::*;
 
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
