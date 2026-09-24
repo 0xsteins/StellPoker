@@ -92,6 +92,13 @@ pub enum PokerTableError {
     BoardAlreadyRevealedForRun = 50,
     JackpotNotConfigured = 45,
     BadBeatHandDataInvalid = 46,
+    // Governance (Issue #504): timelock + multi-sig gated upgrades.
+    NotAnUpgradeSigner = 51,
+    NotEnoughUpgradeApprovals = 52,
+    UpgradeTimelockPending = 53,
+    NoPendingUpgrade = 54,
+    InvalidGovernanceConfig = 55,
+    UpgradeAlreadyApproved = 56,
 }
 
 #[contracttype]
@@ -252,6 +259,23 @@ pub struct HandHistoryMeta {
     pub total_archived: u32,
 }
 
+/// A contract upgrade proposed through the governance path (Issue #504).
+///
+/// `addr(env)`s of the `signers` who already approved are appended by
+/// `propose_upgrade`. The upgrade only executes once `approvals.len()` reaches
+/// the configured threshold AND the current ledger is at least
+/// `started_ledger + delay_ledgers` (the per-network timelock).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingUpgrade {
+    /// WASM hash the upgrade targets.
+    pub wasm_hash: BytesN<32>,
+    /// Signers who have approved so far (base64-encoded public keys).
+    pub approvals: Vec<Address>,
+    /// Ledger sequence the proposal was first opened on.
+    pub started_ledger: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TableState {
@@ -302,4 +326,14 @@ pub enum DataKey {
     HandHistoryMeta(u32),
     /// Tables a wallet is currently seated at, for multi-table clients.
     PlayerTables(Address),
+    /// Upgrade-governance signer set (Issue #504).
+    UpgradeSigners(u32),
+    /// N-of-M upgrade threshold (Issue #504).
+    UpgradeThreshold(u32),
+    /// Timelock delay in ledgers before an approved upgrade may execute (Issue #504).
+    UpgradeDelay(u32),
+    /// Open upgrade proposal (Issue #504).
+    PendingUpgrade(u32),
+    /// Most recent on-chain chip-dumping evidence report (Issue #506).
+    ChipDumpingReport(u32),
 }

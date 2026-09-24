@@ -40,6 +40,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
+  log-redaction:
+    name: Log redaction policy (Issue #508)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Enforce forbidden log fields
+        run: python3 scripts/check_log_redaction.py
+
   circuits:
     name: Noir circuits
     runs-on: ubuntu-latest

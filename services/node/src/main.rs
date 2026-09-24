@@ -38,6 +38,7 @@ mod api;
 mod limits;
 mod metrics;
 mod private_table;
+mod redact;
 mod session;
 mod tls;
 mod heartbeat;
@@ -64,9 +65,14 @@ pub struct NodeState {
 async fn main() {
     let log_format = std::env::var("REQUEST_LOG_FORMAT").unwrap_or_default();
     if log_format.eq_ignore_ascii_case("json") {
-        tracing_subscriber::fmt().json().init();
+        tracing_subscriber::fmt()
+            .json()
+            .with_writer(redact::RedactingMakeWriter::new(std::io::stdout))
+            .init();
     } else {
-        tracing_subscriber::fmt().init();
+        tracing_subscriber::fmt()
+            .with_writer(redact::RedactingMakeWriter::new(std::io::stdout))
+            .init();
     }
 
     let node_id: u32 = std::env::var("NODE_ID")

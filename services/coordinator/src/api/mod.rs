@@ -22,7 +22,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{feature_flags, mpc, session_gc, soroban, AppState, MpcNodeProgress, TableSession};
+use crate::{
+    anti_dumping, feature_flags, mpc, session_gc, soroban, AppState, MpcNodeProgress, TableSession,
+};
 use auth::{allow_insecure_dev_auth, enforce_rate_limit, validate_signed_request};
 use parsing::{
     parse_deal_outputs, parse_requested_buy_in, parse_reveal_outputs, parse_showdown_outputs,
@@ -1037,6 +1039,9 @@ pub async fn request_showdown(
         };
     }
 
+    let settle_participants = session.player_order.clone();
+    let settle_hand_number = session.proof_nonce as u32;
+
     let (status, winner, winner_index) = if settled_by_timeout {
         ("settled_timeout".to_string(), String::new(), 0)
     } else if is_rit_run1 {
@@ -1053,6 +1058,40 @@ pub async fn request_showdown(
         )
     };
     drop(tables);
+
+    // Issue #504: feed the anti-chip-dumping detector with a settled hand
+    // outcome. Only public data is used (participants, winner, pot size). When
+    // Soroban is unconfigured or the on-chain read fails the pot is left at 0
+    // and the detector's amount gate is relaxed to pattern-only detection.
+    if !settled_by_timeout && !is_rit_run1 && !winner.is_empty() {
+        let mut estimated_pot: i128 = 0;
+        if state.soroban_config.is_configured() {
+            if let Ok(raw) = soroban::get_table_state(&state.soroban_config, table_id).await {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(players) = v.get("players").and_then(|p| p.as_array()) {
+                        for seat in players {
+                            if let Some(c) = seat.get("committed").and_then(|c| c.as_str()) {
+                                if let Ok(chips) = c.parse::<i128>() {
+                                    estimated_pot += chips;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(mut detector) = state.anti_dumping.lock() {
+            let outcome = anti_dumping::HandOutcome {
+                table_id,
+                session_id: table_id,
+                hand_number: settle_hand_number,
+                winner: Some(winner.clone()),
+                participants: settle_participants,
+                pot: estimated_pot,
+            };
+            detector.observe(outcome);
+        }
+    }
 
     broadcast_table_state(&state, table_id).await;
 
@@ -1273,12 +1312,38 @@ pub async fn get_player_cards(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let player_index = session
-        .player_order
-        .iter()
-        .position(|p| p == &address)
-        .or_else(|| if insecure_auth { Some(0) } else { None })
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Issue #509: the request-named `address` must be the signed caller's own
+    // identity (a cross-session read of another seat is denied and audited).
+    let isolation_claim = crate::session_isolation::SessionClaim {
+        table_id,
+        address: address.clone(),
+        seat_index: None,
+    };
+    let player_index = match crate::session_isolation::authorize_cards_read(
+        &isolation_claim,
+        &session.player_order,
+        &auth.address,
+        insecure_auth,
+    ) {
+        Ok(idx) => idx,
+        Err(denial) => {
+            // Dev-mode escape hatch: any caller may read seat 0 (Issue #509
+            // still audits real cross-session attempts).
+            if insecure_auth && denial == crate::session_isolation::IsolationDenial::NotSeated {
+                0
+            } else {
+                record_isolation_denial(
+                    &state,
+                    table_id,
+                    &auth.address,
+                    crate::session_isolation::IsolationOperation::ReadHoleCards,
+                    denial,
+                )
+                .await;
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    };
 
     let (pos1, pos2) = session
         .player_card_positions
@@ -1629,6 +1694,109 @@ pub async fn admin_list_sessions(
         "count": list.len(),
         "sessions": list,
     })))
+}
+
+/// GET /api/admin/anti-dumping/reports
+///
+/// Return current anti-chip-dumping signals (Issue #504). Requires operator or
+/// higher. Responses are read-only; the detector never exposes private card or
+/// authority data.
+pub async fn admin_anti_dumping_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_anti_dumping_reports",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::Operator)?;
+
+    let detector_lock = state
+        .anti_dumping
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let reports = detector_lock.reports();
+    let count = reports.len();
+    let window_hands = detector_lock.hand_count();
+    let list: Vec<serde_json::Value> = reports
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "table_id": s.table_id,
+                "suspect": s.suspect,
+                "beneficiary": s.beneficiary,
+                "donated": s.donated,
+                "encounters": s.encounters,
+                "observed_rate": s.observed_rate,
+                "z_score": s.z_score,
+            })
+        })
+        .collect();
+    drop(detector_lock);
+
+    Ok(Json(serde_json::json!({
+        "count": count,
+        "window_hands": window_hands,
+        "reports": list,
+    })))
+}
+
+/// Record an Issue #509 isolation denial: append to the in-memory roll and, when
+/// a database is configured, ship the drained records to the append-only audit
+/// log. Never blocks the active request on a slow database.
+pub async fn record_isolation_denial(
+    state: &AppState,
+    table_id: u32,
+    caller: &str,
+    operation: crate::session_isolation::IsolationOperation,
+    denial: crate::session_isolation::IsolationDenial,
+) {
+    let pending = {
+        let mut audit = match state.isolation_audit.lock() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        crate::session_isolation::record_denial(
+            &mut audit,
+            table_id,
+            caller,
+            operation,
+            denial,
+            None,
+        );
+        audit.drain()
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let Some(pool) = state.db_pool.clone() else {
+        return;
+    };
+    for rec in pending {
+        let (action, endpoint, message, tid, session_id) = rec.to_audit_fields();
+        let method = axum::http::Method::POST;
+        let caller = rec.caller_address.clone();
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let _ = crate::audit_log::log_audit_entry(
+                &pool,
+                Uuid::new_v4(),
+                Some(&caller),
+                &action,
+                &endpoint,
+                &method,
+                None,
+                Some(401),
+                Some(&message),
+                Some(tid),
+                session_id.as_deref(),
+            )
+            .await;
+        });
+    }
 }
 
 /// POST /api/admin/sessions/:session_id/cancel

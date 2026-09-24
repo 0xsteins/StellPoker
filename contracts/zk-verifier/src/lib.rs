@@ -7,6 +7,8 @@ use soroban_sdk::{
 };
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 
+mod governance;
+
 /// Public input layout for each circuit type (field element positions):
 ///
 /// DealValid  (20 fields = 640 bytes):
@@ -91,6 +93,13 @@ pub enum VerifierError {
     WrongCommitmentCount = 10,
     WrongBoardIndicesCount = 11,
     ContractPaused = 12,
+    // Governance (Issue #504): timelock + multi-sig gated upgrades.
+    NotAnUpgradeSigner = 13,
+    NotEnoughUpgradeApprovals = 14,
+    UpgradeTimelockPending = 15,
+    NoPendingUpgrade = 16,
+    InvalidGovernanceConfig = 17,
+    UpgradeAlreadyApproved = 18,
 }
 
 #[contracttype]
@@ -108,6 +117,21 @@ pub enum StorageKey {
     Vk(CircuitType),
     ProofVerified(BytesN<32>),
     Paused,
+    UpgradeSigners,
+    UpgradeThreshold,
+    UpgradeDelay,
+    PendingUpgrade,
+}
+
+/// A contract upgrade proposed through the governance path (Issue #504).
+/// Approvals accumulate until the configured threshold is reached AND the
+/// per-network timelock has elapsed since `started_ledger`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub approvals: Vec<Address>,
+    pub started_ledger: u32,
 }
 
 #[contractimpl]
@@ -164,6 +188,103 @@ impl ZkVerifierContract {
             .instance()
             .get::<StorageKey, bool>(&StorageKey::Paused)
             .unwrap_or(false)
+    }
+
+    /// Configure N-of-M upgrade governance (admin only).
+    ///
+    /// `signers` is the full M-signer set, `threshold` the N approvals
+    /// required, and `delay_ledgers` the per-network timelock before an
+    /// approved upgrade may execute.
+    pub fn configure_upgrade_governance(
+        env: Env,
+        admin: Address,
+        signers: Vec<Address>,
+        threshold: u32,
+        delay_ledgers: u32,
+    ) -> Result<(), VerifierError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(VerifierError::NotInitialized)?;
+        if !ct_address_eq(&env, &admin, &stored_admin) {
+            return Err(VerifierError::NotAdmin);
+        }
+        governance::validate_governance_config(&env, &signers, threshold, delay_ledgers)?;
+        governance::store_governance_config(&env, signers, threshold, delay_ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "governance_configured"),), (threshold, delay_ledgers));
+        Ok(())
+    }
+
+    /// Propose (and sign) a verifier upgrade to `wasm_hash`.
+    ///
+    /// Only a configured signer may call this. Returns the number of distinct
+    /// approvals collected so far.
+    pub fn propose_upgrade(
+        env: Env,
+        signer: Address,
+        wasm_hash: BytesN<32>,
+    ) -> Result<u32, VerifierError> {
+        signer.require_auth();
+        if !governance::governance_configured(&env) {
+            return Err(VerifierError::InvalidGovernanceConfig);
+        }
+        let approvals = governance::propose_upgrade(&env, &signer, wasm_hash.clone())?;
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_proposed"),),
+            (wasm_hash, approvals),
+        );
+        Ok(approvals)
+    }
+
+    /// Execute the pending upgrade once fully approved and its timelock has
+    /// elapsed. The target WASM hash is taken from the proposal.
+    pub fn execute_upgrade(env: Env) -> Result<(), VerifierError> {
+        if !governance::governance_configured(&env) {
+            return Err(VerifierError::InvalidGovernanceConfig);
+        }
+        let pending = governance::load_pending(&env)?;
+        let wasm_hash = pending.wasm_hash.clone();
+        governance::can_execute(&env, &wasm_hash)?;
+        env.deployer().update_current_contract_wasm(wasm_hash.clone());
+        governance::clear_pending(&env);
+        env.events()
+            .publish((Symbol::new(&env, "upgrade_executed"),), wasm_hash);
+        Ok(())
+    }
+
+    /// Read-only oracle mirroring `execute_upgrade`'s gating: returns `Ok(())`
+    /// only when a fully approved proposal whose timelock has elapsed exists.
+    /// Lets off-chain watchers (and tests) poll upgrade readiness.
+    pub fn can_execute_upgrade(env: Env) -> Result<(), VerifierError> {
+        if !governance::governance_configured(&env) {
+            return Err(VerifierError::InvalidGovernanceConfig);
+        }
+        let pending = governance::load_pending(&env)?;
+        governance::can_execute(&env, &pending.wasm_hash)?;
+        Ok(())
+    }
+
+    /// View current upgrade-governance settings.
+    pub fn get_upgrade_governance(env: Env) -> (Vec<Address>, u32, u32) {
+        (
+            governance::load_signers(&env),
+            env.storage()
+                .instance()
+                .get::<StorageKey, u32>(&StorageKey::UpgradeThreshold)
+                .unwrap_or(0),
+            env.storage()
+                .instance()
+                .get::<StorageKey, u32>(&StorageKey::UpgradeDelay)
+                .unwrap_or(0),
+        )
+    }
+
+    /// Read the pending upgrade proposal, if any.
+    pub fn get_pending_upgrade(env: Env) -> Result<PendingUpgrade, VerifierError> {
+        governance::load_pending(&env)
     }
 
     /// Store a verification key for a circuit type.
@@ -457,7 +578,10 @@ impl ZkVerifierContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        vec, Address, Bytes, Env,
+    };
 
     fn setup() -> (Env, ZkVerifierContractClient<'static>, Address) {
         let env = Env::default();
@@ -507,5 +631,144 @@ mod test {
         let vk = Bytes::new(&env);
         let result = client.try_set_verification_key(&admin, &CircuitType::DealValid, &vk);
         assert!(matches!(result, Err(Ok(VerifierError::VkParseError))));
+    }
+
+    // ------------------------------------------------------------------
+    // Upgrade governance (Issue #504)
+    // ------------------------------------------------------------------
+
+    const GOV_DELAY: u32 = 100;
+
+    fn wasm_hash(env: &Env, tag: u8) -> BytesN<32> {
+        let mut arr = [tag; 32];
+        arr[0] = tag;
+        BytesN::from_array(env, &arr)
+    }
+
+    #[test]
+    fn test_governance_threshold_and_timelock() {
+        let (env, client, admin) = setup();
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        client.configure_upgrade_governance(&admin, &vec![&env, s1.clone(), s2.clone()], &2, &GOV_DELAY);
+
+        let target = wasm_hash(&env, 1);
+        // Signer 1 proposes; threshold (2) not yet reached.
+        client.propose_upgrade(&s1, &target);
+        let approvals = client.get_pending_upgrade();
+        assert_eq!(approvals.approvals.len(), 1);
+        assert_eq!(
+            client.try_can_execute_upgrade(),
+            Err(Ok(VerifierError::NotEnoughUpgradeApprovals))
+        );
+
+        // Signer 2 approves; timelock not yet elapsed.
+        client.propose_upgrade(&s2, &target);
+        env.ledger().set_sequence_number(1);
+        assert_eq!(
+            client.try_can_execute_upgrade(),
+            Err(Ok(VerifierError::UpgradeTimelockPending))
+        );
+
+        // Once approved AND past the delay the upgrade is executable.
+        env.ledger().set_sequence_number(GOV_DELAY + 1);
+        assert_eq!(client.try_can_execute_upgrade(), Ok(Ok(())));
+    }
+
+    #[test]
+    fn test_governance_rejects_non_signer_and_bad_config() {
+        let (env, client, admin) = setup();
+        let s1 = Address::generate(&env);
+        client.configure_upgrade_governance(&admin, &vec![&env, s1.clone()], &1, &GOV_DELAY);
+
+        let stranger = Address::generate(&env);
+        let target = wasm_hash(&env, 2);
+        assert_eq!(
+            client.try_propose_upgrade(&stranger, &target),
+            Err(Ok(VerifierError::NotAnUpgradeSigner))
+        );
+
+        // Single signer may not run before the timelock (threshold met but delay pending).
+        client.propose_upgrade(&s1, &target);
+        env.ledger().set_sequence_number(GOV_DELAY - 1);
+        assert_eq!(
+            client.try_can_execute_upgrade(),
+            Err(Ok(VerifierError::UpgradeTimelockPending))
+        );
+        env.ledger().set_sequence_number(GOV_DELAY + 1);
+        assert_eq!(client.try_can_execute_upgrade(), Ok(Ok(())));
+    }
+
+    #[test]
+    fn test_governance_duplicate_approval_rejected() {
+        let (env, client, admin) = setup();
+        let s1 = Address::generate(&env);
+        client.configure_upgrade_governance(&admin, &vec![&env, s1.clone()], &1, &GOV_DELAY);
+
+        let target = wasm_hash(&env, 3);
+        client.propose_upgrade(&s1, &target);
+        assert_eq!(
+            client.try_propose_upgrade(&s1, &target),
+            Err(Ok(VerifierError::UpgradeAlreadyApproved))
+        );
+    }
+
+    #[test]
+    fn test_governance_config_validation() {
+        let (env, client, admin) = setup();
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+
+        // Empty signers.
+        assert_eq!(
+            client.try_configure_upgrade_governance(&admin, &Vec::new(&env), &1, &GOV_DELAY),
+            Err(Ok(VerifierError::InvalidGovernanceConfig))
+        );
+        // Zero threshold.
+        assert_eq!(
+            client.try_configure_upgrade_governance(
+                &admin,
+                &vec![&env, s1.clone(), s2.clone()],
+                &0,
+                &GOV_DELAY
+            ),
+            Err(Ok(VerifierError::InvalidGovernanceConfig))
+        );
+        // Threshold exceeds set size.
+        assert_eq!(
+            client.try_configure_upgrade_governance(
+                &admin,
+                &vec![&env, s1.clone(), s2.clone()],
+                &3,
+                &GOV_DELAY
+            ),
+            Err(Ok(VerifierError::InvalidGovernanceConfig))
+        );
+        // Zero timelock delay.
+        assert_eq!(
+            client.try_configure_upgrade_governance(
+                &admin,
+                &vec![&env, s1.clone(), s2.clone()],
+                &2,
+                &0
+            ),
+            Err(Ok(VerifierError::InvalidGovernanceConfig))
+        );
+        // Duplicate signer.
+        assert_eq!(
+            client.try_configure_upgrade_governance(&admin, &vec![&env, s1.clone(), s1], &2, &GOV_DELAY),
+            Err(Ok(VerifierError::InvalidGovernanceConfig))
+        );
+    }
+
+    #[test]
+    fn test_governance_admin_only() {
+        let (env, client, _admin) = setup();
+        let stranger = Address::generate(&env);
+        let s1 = Address::generate(&env);
+        assert_eq!(
+            client.try_configure_upgrade_governance(&stranger, &vec![&env, s1], &1, &GOV_DELAY),
+            Err(Ok(VerifierError::NotAdmin))
+        );
     }
 }

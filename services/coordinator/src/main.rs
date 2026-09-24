@@ -40,6 +40,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 mod api;
+mod anti_dumping;
 mod api_version;
 mod archiver;
 mod audit_log;
@@ -61,10 +62,12 @@ mod node_reliability;
 mod plugin;
 mod proof_cache;
 mod rate_limit_db;
+mod redact;
 #[path = "middleware.rs"]
 mod request_log;
 mod session_cache;
 mod session_gc;
+mod session_isolation;
 mod session_migration;
 mod soroban;
 mod stats;
@@ -307,6 +310,14 @@ struct AppState {
     /// A session ID that has already been used is rejected to prevent replay
     /// attacks on deal/reveal/showdown proofs.
     used_session_ids: Arc<RwLock<HashSet<String>>>,
+    /// Anti-chip-dumping detector fed with settled hand outcomes (Issue #504).
+    /// Kept as `Arc<Mutex<_>>` because it is mutated from showdown handlers and
+    /// read by the admin report endpoint.
+    anti_dumping: Arc<std::sync::Mutex<anti_dumping::DumpingDetector>>,
+    /// Multi-tenant isolation denial audit (Issue #509). Records every
+    /// cross-session read/write/subscribe attempt that was denied so operators
+    /// can prove sessions A and B cannot observe each other.
+    isolation_audit: Arc<std::sync::Mutex<session_isolation::IsolationAudit>>,
 }
 
 #[derive(Clone)]
@@ -390,12 +401,20 @@ struct RateLimitState {
 
 #[tokio::main]
 async fn main() {
-    // Structured logging: REQUEST_LOG_FORMAT=json uses JSON output; default is human-readable.
+    // Structured logging: REQUEST_LOG_FORMAT=json uses JSON output; default is
+    // human-readable. Every line passes through the redaction writer (Issue
+    // #509) so card values, MPC shares and commitment salts are stripped from
+    // either format before they reach the sink.
     let log_format = std::env::var("REQUEST_LOG_FORMAT").unwrap_or_default();
     if log_format.eq_ignore_ascii_case("json") {
-        tracing_subscriber::fmt().json().init();
+        tracing_subscriber::fmt()
+            .json()
+            .with_writer(redact::RedactingMakeWriter::new(std::io::stdout))
+            .init();
     } else {
-        tracing_subscriber::fmt().init();
+        tracing_subscriber::fmt()
+            .with_writer(redact::RedactingMakeWriter::new(std::io::stdout))
+            .init();
     }
 
     let enc_key =
@@ -709,6 +728,12 @@ async fn main() {
         benchmark_store,
         committee_key_rotation,
         used_session_ids: Arc::new(RwLock::new(HashSet::new())),
+        anti_dumping: Arc::new(std::sync::Mutex::new(
+            anti_dumping::DumpingDetector::with_default_config(),
+        )),
+        isolation_audit: Arc::new(std::sync::Mutex::new(
+            session_isolation::IsolationAudit::default(),
+        )),
     };
     idempotency::spawn_gc_task(state.idempotency_store.clone());
     key_rotation::spawn_rotation_task(
@@ -923,6 +948,10 @@ async fn main() {
             get(api::admin_get_archive),
         )
         .route("/api/admin/archives/purge", post(api::admin_purge_archives))
+        .route(
+            "/api/admin/anti-dumping/reports",
+            get(api::admin_anti_dumping_reports),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.idempotency_store.clone(),
             idempotency::idempotency_middleware,
@@ -1240,14 +1269,82 @@ async fn handle_chat_socket(socket: WebSocket, table_id: u32, state: AppState) {
 /// (or whose upgrade fails) should fall back to polling
 /// `GET /api/table/:table_id/state`.
 async fn game_state_ws_handler(
-    ws: WebSocketUpgrade,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     axum::extract::Path(table_id): axum::extract::Path<u32>,
     State(state): State<AppState>,
+    ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_game_state_socket(socket, table_id, state))
+    let token_table = ws_token_table(params.get("session"));
+    let token_player = ws_token_player(params.get("session"));
+    ws.on_upgrade(move |socket| {
+        handle_game_state_socket(socket, table_id, state, token_table, token_player)
+    })
 }
 
-async fn handle_game_state_socket(socket: WebSocket, table_id: u32, state: AppState) {
+/// Parse the `table-<id>` table binding from a WS subscription token.
+fn ws_token_table(token: Option<&String>) -> Option<u32> {
+    let t = token?;
+    let mut parts = t.splitn(3, '-');
+    if parts.next()? != "table" {
+        return None;
+    }
+    parts.next()?.parse::<u32>().ok()
+}
+
+/// Parse the `<address>` player binding from a `table-<id>-<address>` token.
+fn ws_token_player(token: Option<&String>) -> Option<String> {
+    let t = token?;
+    let mut parts = t.splitn(3, '-');
+    if parts.next()? != "table" {
+        return None;
+    }
+    let _ = parts.next()?;
+    Some(parts.next()?.to_string())
+}
+
+async fn handle_game_state_socket(
+    socket: WebSocket,
+    table_id: u32,
+    state: AppState,
+    token_table: Option<u32>,
+    token_player: Option<String>,
+) {
+    // Issue #509: only a seated player carrying a token bound to this table may
+    // subscribe to its state topic. Cross-session subscription attempts are
+    // denied and audited before any snapshot is pushed.
+    let denied = {
+        let tables = state.tables.read().await;
+        tables.get(&table_id).map_or_else(
+            || Some(session_isolation::IsolationDenial::InvalidSessionToken),
+            |session| {
+                session_isolation::authorize_subscribe(
+                    table_id,
+                    token_table,
+                    token_player.as_deref(),
+                    &session.player_order,
+                )
+                .err()
+            },
+        )
+    };
+    if let Some(denial) = denied {
+        api::record_isolation_denial(
+            &state,
+            table_id,
+            token_player.as_deref().unwrap_or("unknown"),
+            session_isolation::IsolationOperation::SubscribeState,
+            denial,
+        )
+        .await;
+        tracing::warn!(
+            "Isolation denial on WS subscribe: table {}, player {:?}, reason {}",
+            table_id,
+            token_player,
+            denial.as_str()
+        );
+        return;
+    }
+
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     let tx = {
