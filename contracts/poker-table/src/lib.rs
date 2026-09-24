@@ -2740,12 +2740,38 @@ impl PokerTableContract {
         Ok(())
     }
 
+    /// Get auth manager.
+    ///
+    /// # Parameters
+    /// - `table_id`: parameter
+    ///
+    /// # Returns
+    /// - `Option<Address>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_auth_manager(env: Env, table_id: u32) -> Option<Address> {
         env.storage()
             .instance()
             .get(&DataKey::AuthManager(table_id))
     }
 
+    /// Clear auth manager.
+    ///
+    /// # Parameters
+    /// - `table_id`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), PokerTableError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn clear_auth_manager(env: Env, table_id: u32) -> Result<(), PokerTableError> {
         let table = load_table(&env, table_id)?;
         table.admin.require_auth();

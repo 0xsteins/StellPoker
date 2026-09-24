@@ -48,6 +48,20 @@ pub fn load_or_init(env: &Env, table_id: u32, player: &Address, cfg: &TimeBankCo
     bank
 }
 
+/// Get bank.
+///
+/// # Parameters
+/// - `table_id`: parameter
+/// - `player`: parameter
+///
+/// # Returns
+/// - `Option<TimeBank>`
+///
+/// # Errors
+/// Returns an error if the operation fails.
+///
+/// # Authorization
+/// Requires appropriate authorization.
 pub fn get_bank(env: &Env, table_id: u32, player: &Address) -> Option<TimeBank> {
     env.storage()
         .persistent()

@@ -833,12 +833,37 @@ impl AuthManagerContract {
         }
     }
 
+    /// Get multisig config.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Option<MultiSigConfig>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_multisig_config(env: Env) -> Option<MultiSigConfig> {
         env.storage()
             .instance()
             .get(&DataKey::MultiSigConfig)
     }
 
+    /// Pause.
+    ///
+    /// # Parameters
+    /// - `caller`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), AuthError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn pause(env: Env, caller: Address) -> Result<(), AuthError> {
         caller.require_auth();
         require_admin(&env, &caller)?;
@@ -848,6 +873,19 @@ impl AuthManagerContract {
         Ok(())
     }
 
+    /// Unpause.
+    ///
+    /// # Parameters
+    /// - `caller`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), AuthError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn unpause(env: Env, caller: Address) -> Result<(), AuthError> {
         caller.require_auth();
         require_admin(&env, &caller)?;
@@ -857,6 +895,18 @@ impl AuthManagerContract {
         Ok(())
     }
 
+    /// Is paused.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `bool`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()

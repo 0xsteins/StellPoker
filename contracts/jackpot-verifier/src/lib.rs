@@ -189,6 +189,20 @@ fn jackpot_type_rank_threshold(jackpot_type: &JackpotType) -> (u32, u32) {
 
 #[contractimpl]
 impl JackpotVerifierContract {
+    /// Initialize.
+    ///
+    /// # Parameters
+    /// - `admin`: parameter
+    /// - `config`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), JackpotError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn initialize(env: Env, admin: Address, config: JackpotConfig) -> Result<(), JackpotError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(JackpotError::AlreadyInitialized);
@@ -202,6 +216,20 @@ impl JackpotVerifierContract {
         Ok(())
     }
 
+    /// Set config.
+    ///
+    /// # Parameters
+    /// - `admin`: parameter
+    /// - `config`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), JackpotError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_config(env: Env, admin: Address, config: JackpotConfig) -> Result<(), JackpotError> {
         admin.require_auth();
         let stored_admin: Address = env
@@ -518,10 +546,36 @@ impl JackpotVerifierContract {
             .has(&DataKey::ClaimHistory(table_id, hand_number))
     }
 
+    /// Get config.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Option<JackpotConfig>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_config(env: Env) -> Option<JackpotConfig> {
         env.storage().instance().get(&DataKey::Config)
     }
 
+    /// Set paused.
+    ///
+    /// # Parameters
+    /// - `admin`: parameter
+    /// - `paused`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), JackpotError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), JackpotError> {
         admin.require_auth();
         let stored_admin: Address = env
@@ -562,6 +616,18 @@ impl JackpotVerifierContract {
         Ok(pool)
     }
 
+    /// Get pool.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `i128`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_pool(env: Env) -> i128 {
         env.storage()
             .instance()

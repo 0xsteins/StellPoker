@@ -217,6 +217,18 @@ impl StraddleConfig {
         }
     }
 
+    /// Disabled.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Self`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn disabled() -> Self {
         Self {
             multiplier: 0,
@@ -349,6 +361,18 @@ pub struct HandTypeDistribution {
 }
 
 impl HandTypeDistribution {
+    /// New.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Self`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn new(env: &Env) -> Self {
         let counts = Vec::from_array(env, [0u64; 10]);
         HandTypeDistribution {
@@ -718,6 +742,18 @@ pub struct TimeBankConfig {
 }
 
 impl TimeBankConfig {
+    /// Default config.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Self`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn default_config() -> Self {
         TimeBankConfig {
             initial_seconds: 60,
@@ -728,6 +764,18 @@ impl TimeBankConfig {
             max_extensions_per_hand: 2,
         }
     }
+    /// Disabled.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Self`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn disabled() -> Self {
         TimeBankConfig {
             initial_seconds: 0,
@@ -738,6 +786,18 @@ impl TimeBankConfig {
             max_extensions_per_hand: 0,
         }
     }
+    /// Is enabled.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `bool`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn is_enabled(&self) -> bool {
         self.max_seconds > 0 && self.extension_seconds > 0
     }

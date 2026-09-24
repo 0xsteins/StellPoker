@@ -338,18 +338,57 @@ impl RakebackRewardsContract {
 
     // ── Admin Management Functions ─────────────────────────────────────────
 
+    /// Set config.
+    ///
+    /// # Parameters
+    /// - `config`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), RakebackError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_config(env: Env, config: RakebackConfig) -> Result<(), RakebackError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Config, &config);
         Ok(())
     }
 
+    /// Set tier thresholds.
+    ///
+    /// # Parameters
+    /// - `tiers`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), RakebackError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_tier_thresholds(env: Env, tiers: TierConfig) -> Result<(), RakebackError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::TierThresholds, &tiers);
         Ok(())
     }
 
+    /// Set reward token.
+    ///
+    /// # Parameters
+    /// - `reward_token`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), RakebackError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_reward_token(env: Env, reward_token: Option<Address>) -> Result<(), RakebackError> {
         Self::require_admin(&env)?;
         if let Some(token_addr) = reward_token {
@@ -370,18 +409,55 @@ impl RakebackRewardsContract {
         Ok(())
     }
 
+    /// Pause.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Result<(), RakebackError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn pause(env: Env) -> Result<(), RakebackError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         Ok(())
     }
 
+    /// Unpause.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Result<(), RakebackError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn unpause(env: Env) -> Result<(), RakebackError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
     }
 
+    /// Transfer admin.
+    ///
+    /// # Parameters
+    /// - `new_admin`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), RakebackError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), RakebackError> {
         Self::require_admin(&env)?;
         new_admin.require_auth();

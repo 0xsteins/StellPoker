@@ -18,12 +18,96 @@ pub trait AuthManager {
 pub mod perm {
     use soroban_sdk::Symbol;
     use soroban_sdk::Env;
+    /// Create table.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn create_table(env: &Env) -> Symbol { Symbol::new(env, "CreateTable") }
+    /// Pause table.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn pause_table(env: &Env) -> Symbol { Symbol::new(env, "PauseTable") }
+    /// Configure table.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn configure_table(env: &Env) -> Symbol { Symbol::new(env, "ConfigureTable") }
+    /// Withdraw rake.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn withdraw_rake(env: &Env) -> Symbol { Symbol::new(env, "WithdrawRake") }
+    /// Manage time bank.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn manage_time_bank(env: &Env) -> Symbol { Symbol::new(env, "ManageTimeBank") }
+    /// Ban player.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn ban_player(env: &Env) -> Symbol { Symbol::new(env, "BanPlayer") }
+    /// Upgrade contract.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Symbol`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn upgrade_contract(env: &Env) -> Symbol { Symbol::new(env, "UpgradeContract") }
 }
 

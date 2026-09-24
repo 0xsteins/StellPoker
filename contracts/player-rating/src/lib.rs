@@ -154,6 +154,19 @@ impl PlayerRatingContract {
         Ok(())
     }
 
+    /// Pause.
+    ///
+    /// # Parameters
+    /// - `admin`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), RatingError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn pause(env: Env, admin: Address) -> Result<(), RatingError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
@@ -161,6 +174,19 @@ impl PlayerRatingContract {
         Ok(())
     }
 
+    /// Unpause.
+    ///
+    /// # Parameters
+    /// - `admin`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), RatingError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn unpause(env: Env, admin: Address) -> Result<(), RatingError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
@@ -318,10 +344,34 @@ impl PlayerRatingContract {
         Ok(out)
     }
 
+    /// Get config.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Result<RatingConfig, RatingError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_config(env: Env) -> Result<RatingConfig, RatingError> {
         Self::config(&env)
     }
 
+    /// Leaderboard size.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Result<u32, RatingError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn leaderboard_size(env: Env) -> Result<u32, RatingError> {
         Self::require_initialized(&env)?;
         let board: Vec<Address> = env

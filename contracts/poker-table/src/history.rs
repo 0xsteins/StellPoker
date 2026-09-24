@@ -188,6 +188,19 @@ pub fn get_hand(env: &Env, table_id: u32, hand_number: u32) -> Option<HandRecord
     None
 }
 
+/// Load meta.
+///
+/// # Parameters
+/// - `table_id`: parameter
+///
+/// # Returns
+/// - `HandHistoryMeta`
+///
+/// # Errors
+/// Returns an error if the operation fails.
+///
+/// # Authorization
+/// Requires appropriate authorization.
 pub fn load_meta(env: &Env, table_id: u32) -> HandHistoryMeta {
     env.storage()
         .persistent()
