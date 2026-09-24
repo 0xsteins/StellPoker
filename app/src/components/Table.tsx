@@ -27,6 +27,8 @@ import { HandTimeline } from "./HandTimeline";
 import { MobileActionBar } from "./MobileActionBar";
 import { TransactionSimulation } from "./TransactionSimulation";
 import { MpcNodeIndicator } from "./MpcNodeIndicator";
+import { SpectatorCount } from "./SpectatorCount";
+import { spectateHref } from "@/lib/spectator";
 import { TableTabs } from "./TableTabs";
 import { ThemeSelector } from "./ThemeSelector";
 import { Skeleton } from "./Skeleton";
@@ -135,6 +137,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   const [wallet, setWallet] = useState<WalletSession | null>(null);
   const [playMode, setPlayMode] = useState<PlayMode>(initialPlayMode ?? "headsup");
   const [error, setError] = useState<string | null>(null);
+  const [spectatorCount, setSpectatorCount] = useState(0);
   const [walletVerificationError, setWalletVerificationError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [joiningTable, setJoiningTable] = useState(false);
@@ -427,7 +430,15 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
     // have to wait on the slower interval below. `subscribeGameState`
     // returns null on browsers without WebSocket support, in which case the
     // interval poll is the only refresh mechanism.
-    const gameStateSocket = api.subscribeGameState(tableId, () => {
+    const gameStateSocket = api.subscribeGameState(tableId, (msg) => {
+      // Spectator join/leave frames (Issue #171) only update the indicator.
+      if (api.isSpectatorCountEvent(msg)) {
+        setSpectatorCount(msg.spectator_count);
+        return;
+      }
+      if (typeof msg.spectator_count === "number") {
+        setSpectatorCount(msg.spectator_count);
+      }
       void syncOnChainState();
     });
 
@@ -1105,6 +1116,15 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
           </div>
 
           <div className="table-header-right flex items-center gap-2 sm:gap-3">
+            <a
+              href={spectateHref(tableId)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open an anonymous spectator view of this table"
+              className="no-underline"
+            >
+              <SpectatorCount count={spectatorCount} />
+            </a>
             <div className="text-[9px]" style={{ color: "#c8e6ff" }}>
               {t("table.hand", { n: game.handNumber })} | {game.phase.toUpperCase()}
             </div>

@@ -363,6 +363,7 @@ pub async fn list_open_tables(
             max_players: view.max_players,
             joined_wallets,
             open_wallet_slots,
+            spectators: state.spectators.count(table_id),
         });
     }
 
@@ -390,6 +391,7 @@ pub async fn list_table_overview(
                 seated: 0,
                 total_chips: 0,
                 stacks: Vec::new(),
+                spectators: state.spectators.count(*table_id),
             })
             .collect();
         tables.sort_by_key(|t| t.table_id);
@@ -434,6 +436,7 @@ pub async fn list_table_overview(
             seated: view.seats.len(),
             total_chips,
             stacks: view.stacks,
+            spectators: state.spectators.count(table_id),
         });
     }
 
@@ -1689,6 +1692,8 @@ pub struct GameStateEvent {
     /// payload `GET /api/table/:table_id/state` returns. `None` when Soroban
     /// isn't configured or the read failed.
     pub onchain_state: Option<String>,
+    /// Live anonymous spectators watching this table (Issue #171).
+    pub spectator_count: usize,
 }
 
 impl GameStateEvent {
@@ -1703,6 +1708,7 @@ impl GameStateEvent {
             reveal_tx_hashes: session.reveal_tx_hashes.clone(),
             showdown_tx_hash: session.showdown_tx_hash.clone(),
             onchain_state: None,
+            spectator_count: 0,
         }
     }
 }
@@ -1730,6 +1736,7 @@ pub async fn broadcast_table_state(state: &AppState, table_id: u32) {
     let Some(mut event) = event else {
         return;
     };
+    event.spectator_count = state.spectators.count(table_id);
 
     if state.soroban_config.is_configured() {
         event.onchain_state = soroban::get_table_state(&state.soroban_config, table_id)
@@ -1751,8 +1758,23 @@ pub async fn broadcast_table_state(state: &AppState, table_id: u32) {
 /// WebSocket client so it doesn't have to wait for the next mutation.
 pub async fn current_game_state_json(state: &AppState, table_id: u32) -> Option<String> {
     let tables = state.tables.read().await;
-    let event = tables.get(&table_id).map(GameStateEvent::from_session)?;
+    let mut event = tables.get(&table_id).map(GameStateEvent::from_session)?;
+    event.spectator_count = state.spectators.count(table_id);
     serde_json::to_string(&event).ok()
+}
+
+/// GET /api/table/{table_id}/spectators
+///
+/// Number of anonymous spectators currently connected to the table's
+/// `/spectate/ws` stream (Issue #171). Public, no auth.
+pub async fn get_spectator_count(
+    State(state): State<AppState>,
+    Path(table_id): Path<u32>,
+) -> Json<SpectatorCountResponse> {
+    Json(SpectatorCountResponse {
+        table_id,
+        spectator_count: state.spectators.count(table_id),
+    })
 }
 
 /// GET /api/table/{table_id}/state
