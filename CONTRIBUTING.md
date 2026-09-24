@@ -46,11 +46,37 @@ parameter (table/player/hand counts, seats per table).
 | `app/` | Next.js frontend |
 | `scripts/` | Build, deploy, and test scripts |
 
+## Pre-commit Hooks
+
+This repository uses pre-commit hooks to automatically check code quality before committing. Install them with:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Hooks run automatically on every commit and check:
+- **Rust formatting** — `cargo fmt --all --check`
+- **Rust linting** — `cargo clippy --all-targets --all-features`
+- **Noir circuits** — `nargo check --all` (if `nargo` is installed)
+- **General** — trailing whitespace, merge conflicts, YAML syntax
+
+To run hooks manually before committing (e.g., after running `cargo fmt` fixes):
+```bash
+pre-commit run --all-files
+```
+
+To skip pre-commit temporarily (not recommended):
+```bash
+git commit --no-verify
+```
+
 ## Workflow
 
 1. Fork the repository and create a branch from `main`.
 2. Make your changes. Run the relevant tests before opening a PR.
-3. Open a pull request with a clear description of what changed and why.
+3. Pre-commit hooks will run automatically — fix any issues they report.
+4. Open a pull request with a clear description of what changed and why.
 
 ## Contract upgrades
 

@@ -11,6 +11,7 @@ mod ban_list;
 mod betting;
 #[cfg(test)]
 mod blinds_schedule_test;
+mod commit_reveal;
 mod constant_time;
 mod game;
 mod game_hub;
@@ -3006,5 +3007,121 @@ impl PokerTableContract {
         );
 
         Ok(payout)
+    }
+
+    /// Commit to an action by submitting its Keccak256 hash.
+    /// Prevents action ordering leakage by requiring players to reveal after all
+    /// commits are collected. `nonce` is a random value used in the hash computation.
+    pub fn commit_action(
+        env: Env,
+        table_id: u32,
+        player: Address,
+        action_hash: Bytes,
+        nonce_hash: Bytes,
+    ) -> Result<(), PokerTableError> {
+        player.require_auth();
+        require_not_paused(&env, table_id)?;
+
+        if action_hash.len() != 32 {
+            return Err(PokerTableError::InvalidAction);
+        }
+        if nonce_hash.len() != 32 {
+            return Err(PokerTableError::InvalidAction);
+        }
+
+        let table = load_table(&env, table_id)?;
+
+        if !matches!(
+            table.phase,
+            GamePhase::Preflop | GamePhase::Flop | GamePhase::Turn | GamePhase::River
+        ) {
+            return Err(PokerTableError::NotInBettingPhase);
+        }
+
+        let seat = find_seat(&env, &table, &player)?;
+        let commit_key = DataKey::ActionCommitmentHash(table_id, table.hand_number, seat);
+
+        if env.storage().persistent().has(&commit_key) {
+            return Err(PokerTableError::ActionAlreadyCommitted);
+        }
+
+        env.storage().persistent().set(&commit_key, &action_hash);
+        env.storage()
+            .persistent()
+            .set(&format!("{}_nonce", commit_key.to_string()), &nonce_hash);
+        env.storage()
+            .persistent()
+            .extend_ttl(&commit_key, TABLE_TTL_THRESHOLD, TABLE_TTL_EXTEND);
+
+        env.events().publish(
+            (Symbol::new(&env, "action_committed"), table_id),
+            (seat, table.hand_number),
+        );
+
+        Ok(())
+    }
+
+    /// Reveal an action previously committed with `commit_action`.
+    /// Verifies the reveal matches the commitment hash. If verification passes,
+    /// the action is processed normally.
+    pub fn reveal_action(
+        env: Env,
+        table_id: u32,
+        player: Address,
+        seq: u32,
+        action: Action,
+        amount: i128,
+        nonce: Bytes,
+    ) -> Result<(), PokerTableError> {
+        player.require_auth();
+        require_not_paused(&env, table_id)?;
+
+        let mut table = load_table(&env, table_id)?;
+
+        if !matches!(
+            table.phase,
+            GamePhase::Preflop | GamePhase::Flop | GamePhase::Turn | GamePhase::River
+        ) {
+            return Err(PokerTableError::NotInBettingPhase);
+        }
+
+        let seat = find_seat(&env, &table, &player)?;
+        let commit_key = DataKey::ActionCommitmentHash(table_id, table.hand_number, seat);
+
+        let stored_hash: Bytes = env
+            .storage()
+            .persistent()
+            .get(&commit_key)
+            .ok_or(PokerTableError::ActionCommitmentNotFound)?;
+
+        let computed_hash = commit_reveal::compute_action_hash(&env, &action, amount, &nonce);
+
+        if stored_hash != computed_hash {
+            return Err(PokerTableError::InvalidActionReveal);
+        }
+
+        env.storage().persistent().remove(&commit_key);
+
+        // Process the revealed action normally
+        let counter_key = DataKey::PlayerActionCounter(table_id, player.clone());
+        let last_seq: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0);
+        if seq != last_seq.wrapping_add(1) {
+            return Err(PokerTableError::StaleActionSequence);
+        }
+
+        env.storage().persistent().set(&counter_key, &seq);
+        env.storage()
+            .persistent()
+            .extend_ttl(&counter_key, TABLE_TTL_THRESHOLD, TABLE_TTL_EXTEND);
+
+        betting::process_action(&env, &mut table, &player, &action)?;
+        save_table(&env, &table);
+
+        env.events().publish(
+            (Symbol::new(&env, "action_revealed"), table_id),
+            (seat, table.hand_number),
+        );
+
+        Ok(())
     }
 }
