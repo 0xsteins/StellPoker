@@ -21,6 +21,7 @@ import {
 import { useWalletMonitor } from "@/lib/use-wallet-monitor";
 import { GameBoyButton, GameBoyModal } from "./GameBoyModal";
 import { HandHistoryPanel } from "./HandHistoryPanel";
+import { ProofExplorerPanel } from "./ProofExplorerPanel";
 import { HandReplayer } from "./HandReplayer";
 import { HandTimeline } from "./HandTimeline";
 import { MobileActionBar } from "./MobileActionBar";
@@ -41,9 +42,17 @@ import {
   loadHandHistory,
   saveHandHistoryEntry,
   buildHandRankName,
+  actionsFromTimeline,
   type HandHistoryEntry,
   type Street,
 } from "@/lib/hand-history";
+import {
+  loadStackTrends,
+  recordStacks,
+  saveStackTrends,
+  type StackTrends,
+} from "@/lib/stack-trend";
+import { readTableStakes, saveSeatPreference } from "@/lib/quick-seat";
 import {
   useTurnNotification,
   requestPermissionOnJoin,
@@ -138,6 +147,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   const [gameboyOpen, setGameboyOpen] = useState(false);
   const [autoRebuyOpen, setAutoRebuyOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [proofPanelOpen, setProofPanelOpen] = useState(false);
   const [loadingSkeletonTest, setLoadingSkeletonTest] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HandHistoryEntry[]>(() =>
     loadHandHistory(tableId)
@@ -146,6 +156,10 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   // replayer and the panel's `onReplay` callback were both wired up already,
   // but the state connecting them was missing, which broke the type-check.
   const [replayEntry, setReplayEntry] = useState<HandHistoryEntry | null>(null);
+  // Each seat's settled stack over recent hands, for the sparklines (#157).
+  const [stackTrends, setStackTrends] = useState<StackTrends>(() =>
+    loadStackTrends(tableId)
+  );
   // Live hand timeline (#176): every moment of the hand in progress, plus the
   // moment currently being reviewed (null while pinned to live).
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
@@ -163,6 +177,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const autoStreetRef = useRef<string>("");
   const inferredModeRef = useRef(false);
+  const seatPreferenceRef = useRef<string | null>(null);
   const streetLogRef = useRef<{ handNumber: number; streets: { street: Street; pot: number; boardCards: number[] }[] }>({
     handNumber: 0,
     streets: [],
@@ -573,12 +588,57 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
         handRankName: buildHandRankName(userPlayer?.cards, game.boardCards),
         winnerAddress,
         txHash: game.lastTxHash,
+        // Who was dealt in and how the betting went, for the export (#158).
+        heroAddress: userAddress,
+        players: game.players.map(({ address, seat }) => ({ address, seat })),
+        actions: actionsFromTimeline(game.handNumber, timeline),
       };
       saveHandHistoryEntry(entry);
       setHistoryEntries(loadHandHistory(tableId));
       streetLogRef.current = { handNumber: game.handNumber, streets: [] };
     }
-  }, [game.phase, game.handNumber, game.pot, game.boardCards, game.lastTxHash, tableId, userPlayer, winnerAddress]);
+  }, [game.phase, game.handNumber, game.pot, game.boardCards, game.lastTxHash, game.players, tableId, timeline, userAddress, userPlayer, winnerAddress]);
+
+  // Chip stack trend per seat (#157). Stacks are only recorded between hands,
+  // once the pot has been paid out, so each point is where a player's stack
+  // settled after a hand rather than wherever it stood mid-bet.
+  useEffect(() => {
+    if (game.phase !== "waiting" && game.phase !== "settlement") return;
+    setStackTrends((previous) => {
+      const next = recordStacks(previous, game.handNumber, game.players);
+      if (next !== previous) {
+        saveStackTrends(tableId, next);
+      }
+      return next;
+    });
+  }, [game.phase, game.handNumber, game.players, tableId]);
+
+  // Quick seat (#159): remember the table size, stakes and seat the player is
+  // sitting in, so the lobby can seat them somewhere similar next time.
+  useEffect(() => {
+    if (!userAddress || !userPlayer || !lobby || playMode === "single") return;
+    const key = `${userAddress}:${tableId}`;
+    if (seatPreferenceRef.current === key) return;
+    seatPreferenceRef.current = key;
+
+    const { max_players: maxPlayers } = lobby;
+    const seatIndex = userPlayer.seat;
+    api
+      .getParsedTableState(tableId)
+      .then(({ parsed }) => {
+        const stakes = readTableStakes(parsed);
+        if (!stakes) return;
+        saveSeatPreference(userAddress, {
+          maxPlayers,
+          buyIn: stakes.buyIn.toString(),
+          token: stakes.token,
+          seatIndex,
+        });
+      })
+      .catch(() => {
+        // Non-fatal: quick seat keeps whatever it remembered before.
+      });
+  }, [lobby, playMode, tableId, userAddress, userPlayer]);
 
   // ── Live hand timeline (#176) ──────────────────────────────────────────────
   // Every state sync is an observation; `observeEvent` decides whether this
@@ -991,6 +1051,22 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
             >
               {t("nav.history")}
             </button>
+            <button
+              onClick={() => setProofPanelOpen((open) => !open)}
+              className="text-[9px] mr-2"
+              style={{
+                background: "none",
+                border: "none",
+                color: "#c8e6ff",
+                textDecoration: "underline",
+                cursor: "pointer",
+                padding: 0,
+              }}
+              title="ZK Proof Explorer"
+              aria-pressed={proofPanelOpen}
+            >
+              PROOFS
+            </button>
             {userAddress && (
               <button
                 onClick={() => setAutoRebuyOpen(true)}
@@ -1177,6 +1253,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
                     boardCards={game.boardCards}
                     gamePhase={game.phase}
                     showStatsTooltip={playMode !== "single"}
+                    stackTrend={stackTrends[player.address]?.map((p) => p.stack)}
                   />
                 ))}
 
@@ -1273,6 +1350,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
                   activeEmote={seatEmotes[userPlayer.seat]}
                   boardCards={game.boardCards}
                   gamePhase={game.phase}
+                  stackTrend={stackTrends[userPlayer.address]?.map((p) => p.stack)}
                 />
               ) : (
                 <div className="flex flex-col items-center gap-2" style={{ opacity: 0.25 }}>
@@ -1376,6 +1454,12 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
         onClose={() => setHistoryOpen(false)}
         entries={historyEntries}
         onReplay={(entry) => setReplayEntry(entry)}
+      />
+
+      {/* Issue #160: proof explorer side panel (bottom sheet on mobile) */}
+      <ProofExplorerPanel
+        open={proofPanelOpen}
+        onClose={() => setProofPanelOpen(false)}
       />
 
       {userAddress && (

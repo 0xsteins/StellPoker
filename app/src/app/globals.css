@@ -850,3 +850,113 @@ textarea {
   outline: 2px dashed #f1c40f;
   outline-offset: 4px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Proof explorer side panel (#160)
+
+   Docked to the right edge on desktop, where it is dragged by its header and
+   resized from its left edge. Below the mobile breakpoint it becomes a bottom
+   sheet instead; as with the action bar, CSS alone decides which, so there is
+   no viewport-width state in React.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.proof-panel {
+  position: fixed;
+  top: 88px;
+  right: 16px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 120px);
+  background: rgba(12, 10, 24, 0.97);
+}
+
+.proof-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  font-size: 9px;
+  color: #f1c40f;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.proof-panel-header:active {
+  cursor: grabbing;
+}
+
+.proof-panel:not(.proof-panel-collapsed) .proof-panel-header {
+  border-bottom: 2px solid rgba(196, 125, 46, 0.3);
+}
+
+.proof-panel-btn {
+  min-width: 24px;
+  min-height: 24px;
+  background: none;
+  border: none;
+  color: #f5e6c8;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 9px;
+}
+
+.proof-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 8px;
+}
+
+.proof-panel-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 8px;
+  z-index: 1;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.proof-panel-resize:hover,
+.proof-panel-resize:focus-visible {
+  background: rgba(241, 196, 15, 0.35);
+  outline: none;
+}
+
+@media (max-width: 640px) {
+  .proof-panel {
+    top: auto !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: 60vh !important;
+    transform: none !important;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Sit above the sticky action bar rather than cover it (#175). */
+  body:has(.mobile-action-bar) .proof-panel {
+    bottom: calc(96px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  .proof-panel-header {
+    cursor: default;
+  }
+
+  .proof-panel-resize {
+    display: none;
+  }
+
+  /* WCAG 2.5.5 touch targets. */
+  .proof-panel-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
