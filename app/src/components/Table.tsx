@@ -3,6 +3,15 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import {
+  CHAT_EMOTES,
+  CHAT_MAX_MESSAGE_LENGTH,
+  createChatRateLimiter,
+  isChatEmote,
+  parseIncomingChatFrame,
+  sanitizeChatAlias,
+  sanitizeChatText,
+} from "@/lib/chat-sanitize";
 import { Board } from "./Board";
 import { Card } from "./Card";
 import { PlayerSeat } from "./PlayerSeat";
@@ -177,6 +186,8 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<Array<{ alias: string; text: string; senderColor: string }>>([]);
+  const [chatNotice, setChatNotice] = useState<string | null>(null);
+  const chatRateLimiterRef = useRef(createChatRateLimiter());
   const [newMessagesCount, setNewMessagesCount] = useState(0);
   const [seatEmotes, setSeatEmotes] = useState<Record<number, string>>({});
   const wsRef = useRef<WebSocket | null>(null);
@@ -880,7 +891,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   ]);
 
   const [emoteRadialOpen, setEmoteRadialOpen] = useState(false);
-  const EMOTES = ["😃", "😢", "😠", "😎", "🤔", "🎉"];
+  const EMOTES = CHAT_EMOTES;
 
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -901,38 +912,30 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
       wsRef.current = ws;
 
       ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data) as {
-            seat_index: number;
-            alias: string;
-            text?: string;
-            emote?: string;
-          };
+        // Untrusted input: validated and reduced to plain text (Issue #140).
+        const frame = parseIncomingChatFrame(event.data);
+        if (!frame) return;
 
-          if (data.text) {
-            const colors = ["#ff6b6b", "#4dabf7", "#51cf66", "#fcc419", "#cc5de8", "#20c997"];
-            const senderColor = colors[data.seat_index % colors.length];
-            setChatMessages((prev) => [
-              ...prev,
-              { alias: data.alias, text: data.text || "", senderColor },
-            ]);
-            if (!chatOpen) {
-              setNewMessagesCount((c) => c + 1);
-            }
+        if (frame.text) {
+          const colors = ["#ff6b6b", "#4dabf7", "#51cf66", "#fcc419", "#cc5de8", "#20c997"];
+          const senderColor = colors[frame.seatIndex % colors.length];
+          const text = frame.text;
+          setChatMessages((prev) => [...prev, { alias: frame.alias, text, senderColor }]);
+          if (!chatOpen) {
+            setNewMessagesCount((c) => c + 1);
           }
+        }
 
-          if (data.emote) {
-            setSeatEmotes((prev) => ({ ...prev, [data.seat_index]: data.emote || "" }));
-            setTimeout(() => {
-              setSeatEmotes((prev) => {
-                const copy = { ...prev };
-                delete copy[data.seat_index];
-                return copy;
-              });
-            }, 3000);
-          }
-        } catch {
-          // Ignore parse errors
+        if (frame.emote) {
+          const emote = frame.emote;
+          setSeatEmotes((prev) => ({ ...prev, [frame.seatIndex]: emote }));
+          setTimeout(() => {
+            setSeatEmotes((prev) => {
+              const copy = { ...prev };
+              delete copy[frame.seatIndex];
+              return copy;
+            });
+          }, 3000);
         }
       };
 
@@ -958,17 +961,23 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
 
   const sendChatMessage = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+    const text = sanitizeChatText(chatInput);
+    if (!text || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (!chatRateLimiterRef.current.tryConsume()) {
+      setChatNotice("Slow down — too many messages.");
+      return;
+    }
+    setChatNotice(null);
 
     const mySeat = userPlayer ? userPlayer.seat : 0;
-    const myAlias = userAddress ? (getAlias(userAddress) || `Seat ${mySeat}`) : `Seat ${mySeat}`;
+    const myAlias = sanitizeChatAlias(userAddress ? getAlias(userAddress) : "", mySeat);
 
     const payload = {
       seat_index: mySeat,
       alias: myAlias,
-      text: chatInput.trim(),
+      text,
     };
 
     wsRef.current.send(JSON.stringify(payload));
@@ -976,8 +985,13 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   };
 
   const sendEmote = (emote: string) => {
+    if (!isChatEmote(emote)) return;
+    if (!chatRateLimiterRef.current.tryConsume()) {
+      setChatNotice("Slow down — too many messages.");
+      return;
+    }
     const mySeat = userPlayer ? userPlayer.seat : 0;
-    const myAlias = userAddress ? (getAlias(userAddress) || `Seat ${mySeat}`) : `Seat ${mySeat}`;
+    const myAlias = sanitizeChatAlias(userAddress ? getAlias(userAddress) : "", mySeat);
 
     setSeatEmotes((prev) => ({ ...prev, [mySeat]: emote }));
     setTimeout(() => {
@@ -1601,6 +1615,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
             {chatMessages.length === 0 ? (
               <div className="text-gray-600 text-center mt-8 italic" style={{ fontSize: "8px" }}>No messages yet.</div>
             ) : (
+              // Rendered as React text nodes only — never dangerouslySetInnerHTML (#140).
               chatMessages.map((msg, idx) => (
                 <div key={idx} className="leading-relaxed">
                   <span style={{ color: msg.senderColor }}>{msg.alias}: </span>
@@ -1624,11 +1639,18 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
             ))}
           </div>
           
+          {chatNotice && (
+            <div className="text-[#ff6b6b] text-[7px]" role="status">
+              {chatNotice}
+            </div>
+          )}
+
           {/* Input row */}
           <form onSubmit={sendChatMessage} className="flex gap-1 mt-1">
             <input
               type="text"
               value={chatInput}
+              maxLength={CHAT_MAX_MESSAGE_LENGTH}
               onChange={(e) => setChatInput(e.target.value)}
               placeholder="Say something..."
               className="flex-1 px-2 py-1 text-[8px]"

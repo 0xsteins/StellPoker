@@ -24,9 +24,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    anti_dumping, feature_flags, mpc, session_gc, soroban, AppState, MpcNodeProgress, TableSession,
-    circuit_pins, feature_flags, mpc, session_cache, session_gc, session_recovery, soroban,
-    AppState, MpcNodeProgress, TableSession,
+    anti_dumping, circuit_pins, feature_flags, mpc, mpc_validation, session_cache, session_gc,
+    session_recovery, soroban, AppState, MpcNodeProgress, TableSession,
 };
 use auth::{allow_insecure_dev_auth, enforce_rate_limit, validate_signed_request};
 use parsing::{
@@ -1717,15 +1716,22 @@ pub async fn get_player_cards(
         node_endpoints = select_mpc_nodes(&state, None).await?;
     }
     let positions = vec![*pos1, *pos2];
+    let hand_commitment = session.hand_commitments.get(player_index).cloned();
     drop(tables); // release read lock before async call
 
-    let (cards, salts) =
-        mpc::resolve_hole_cards(&state.mpc_client, &node_endpoints, table_id, &positions)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to resolve hole cards: {}", e);
-                StatusCode::BAD_GATEWAY
-            })?;
+    // Reconstructed cards are checked against the deal proof's hand
+    // commitment, retrying on mismatch (Issue #139).
+    let (cards, salts) = mpc_validation::resolve_validated(
+        table_id,
+        hand_commitment.as_deref(),
+        mpc_validation::ValidationMode::from_env(),
+        || mpc::resolve_hole_cards(&state.mpc_client, &node_endpoints, table_id, &positions),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to resolve hole cards: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
 
     if cards.len() < 2 || salts.len() < 2 {
         return Err(StatusCode::BAD_GATEWAY);
