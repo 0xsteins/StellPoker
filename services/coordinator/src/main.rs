@@ -45,6 +45,7 @@ mod api_version;
 mod archiver;
 mod audit_log;
 mod bandwidth;
+mod chat;
 mod circuit_pins;
 mod committee_scaling;
 mod cors_db;
@@ -65,6 +66,7 @@ mod mpc_heartbeat;
 mod mpc_identity;
 mod mpc_node_benchmark;
 mod mpc_partition;
+mod mpc_validation;
 mod mpc_version;
 mod node_reliability;
 mod plugin;
@@ -1420,26 +1422,6 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
         .unwrap()
 }
 
-fn sanitize_chat_message(input: &str) -> String {
-    let trimmed = input.trim();
-    let limited = if trimmed.len() > 128 {
-        &trimmed[..128]
-    } else {
-        trimmed
-    };
-    limited.replace('<', "&lt;").replace('>', "&gt;")
-}
-
-fn sanitize_alias(input: &str) -> String {
-    let trimmed = input.trim();
-    let limited = if trimmed.len() > 24 {
-        &trimmed[..24]
-    } else {
-        trimmed
-    };
-    limited.replace('<', "&lt;").replace('>', "&gt;")
-}
-
 async fn chat_ws_handler(
     ws: WebSocketUpgrade,
     axum::extract::Path(table_id): axum::extract::Path<u32>,
@@ -1472,26 +1454,24 @@ async fn handle_chat_socket(socket: WebSocket, table_id: u32, state: AppState) {
         }
     });
 
+    // Every frame is validated and sanitized before it is relayed, and each
+    // connection is rate limited (Issue #140) — see `chat.rs`.
     let mut recv_task = tokio::spawn(async move {
+        let mut limiter = chat::ChatRateLimiter::default();
         while let Some(Ok(msg)) = ws_receiver.next().await {
-            if let Ok(text) = msg.to_text() {
-                if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(text) {
-                    if let Some(text_val) = json_val.get_mut("text") {
-                        if let Some(s) = text_val.as_str() {
-                            let sanitized = sanitize_chat_message(s);
-                            *text_val = serde_json::Value::String(sanitized);
-                        }
-                    }
-                    if let Some(alias_val) = json_val.get_mut("alias") {
-                        if let Some(s) = alias_val.as_str() {
-                            let sanitized = sanitize_alias(s);
-                            *alias_val = serde_json::Value::String(sanitized);
-                        }
-                    }
-
-                    if let Ok(broadcast_msg) = serde_json::to_string(&json_val) {
-                        let _ = tx.send(broadcast_msg);
-                    }
+            let Ok(text) = msg.to_text() else {
+                continue;
+            };
+            if !limiter.allow(Instant::now()) {
+                tracing::warn!(table_id, "chat frame dropped: rate limit exceeded");
+                continue;
+            }
+            match chat::process_incoming_frame(text) {
+                Ok(broadcast_msg) => {
+                    let _ = tx.send(broadcast_msg);
+                }
+                Err(reason) => {
+                    tracing::debug!(table_id, %reason, "chat frame dropped");
                 }
             }
         }

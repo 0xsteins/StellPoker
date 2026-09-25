@@ -3,9 +3,13 @@
 //! Shells out to the Stellar CLI to submit proofs and game state to
 //! the on-chain poker-table contract. Uses the same `tokio::process::Command`
 //! pattern as `mpc.rs` for co-noir subprocess execution.
+//!
+//! State-changing invocations are simulated first and only submitted when
+//! the simulation succeeds — see [`simulation`] (Issue #137).
 
 mod actions;
 mod proofs;
+mod simulation;
 pub mod threshold_signing;
 
 pub use actions::*;
@@ -149,11 +153,7 @@ pub(crate) async fn invoke_contract_with_retries(
         args.push("--".to_string());
         args.extend(contract_args.iter().cloned());
 
-        let output = Command::new("stellar")
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to invoke stellar CLI: {}", e))?;
+        let output = simulation::run_invoke(args).await?;
 
         if output.status.success() {
             return Ok(output);
@@ -207,11 +207,7 @@ pub(crate) async fn invoke_contract_with_source(
     ];
     args.extend(contract_args);
 
-    Command::new("stellar")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to invoke stellar CLI: {}", e))
+    simulation::run_invoke(args).await
 }
 
 /// Like [`invoke_contract_with_source`], but targets the committee-registry
@@ -241,11 +237,7 @@ pub(crate) async fn invoke_committee_registry_with_source(
     ];
     args.extend(contract_args);
 
-    Command::new("stellar")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to invoke stellar CLI: {}", e))
+    simulation::run_invoke(args).await
 }
 
 pub(crate) async fn invoke_contract_with_source_retries(
