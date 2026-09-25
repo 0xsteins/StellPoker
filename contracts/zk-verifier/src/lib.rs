@@ -100,6 +100,7 @@ pub enum VerifierError {
     NoPendingUpgrade = 16,
     InvalidGovernanceConfig = 17,
     UpgradeAlreadyApproved = 18,
+    InvalidVkVersion = 19,
 }
 
 #[contracttype]
@@ -121,6 +122,18 @@ pub enum StorageKey {
     UpgradeThreshold,
     UpgradeDelay,
     PendingUpgrade,
+}
+
+/// Versioned registry entry for a circuit verification key. The content hash
+/// lets deploy tooling and clients pin the exact VK, while `activated_at`
+/// provides an unambiguous on-chain activation boundary.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationKeyEntry {
+    pub hash: BytesN<32>,
+    pub version: u32,
+    pub activated_at: u32,
+    pub vk_data: Bytes,
 }
 
 /// A contract upgrade proposed through the governance path (Issue #504).
@@ -294,6 +307,7 @@ impl ZkVerifierContract {
         admin: Address,
         circuit: CircuitType,
         vk_data: Bytes,
+        version: u32,
     ) -> Result<(), VerifierError> {
         admin.require_auth();
         let stored_admin: Address = env
@@ -308,13 +322,47 @@ impl ZkVerifierContract {
         // Validate the VK can be parsed before storing
         UltraHonkVerifier::new(&env, &vk_data).map_err(|_| VerifierError::VkParseError)?;
 
+        if version == 0 {
+            return Err(VerifierError::InvalidVkVersion);
+        }
+
+        let entry = VerificationKeyEntry {
+            hash: env.crypto().keccak256(&vk_data).into(),
+            version,
+            activated_at: env.ledger().sequence(),
+            vk_data,
+        };
+
+        if let Some(current) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VerificationKeyEntry>(&StorageKey::Vk(circuit.clone()))
+        {
+            if version <= current.version {
+                return Err(VerifierError::InvalidVkVersion);
+            }
+        }
+
         env.storage()
             .persistent()
-            .set(&StorageKey::Vk(circuit.clone()), &vk_data);
+            .set(&StorageKey::Vk(circuit.clone()), &entry);
 
-        env.events()
-            .publish((Symbol::new(&env, "vk_set"),), circuit);
+        env.events().publish(
+            (Symbol::new(&env, "vk_set"), circuit),
+            (entry.hash.clone(), version, entry.activated_at),
+        );
         Ok(())
+    }
+
+    /// Return the active VK registry entry for client-side circuit pinning.
+    pub fn get_verification_key(
+        env: Env,
+        circuit: CircuitType,
+    ) -> Result<VerificationKeyEntry, VerifierError> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Vk(circuit))
+            .ok_or(VerifierError::NoVkForCircuit)
     }
 
     /// Verify an UltraHonk proof for a given circuit type.
@@ -345,15 +393,15 @@ impl ZkVerifierContract {
         }
 
         // Load VK for this circuit
-        let vk_bytes: Bytes = env
+        let vk_entry: VerificationKeyEntry = env
             .storage()
             .persistent()
             .get(&StorageKey::Vk(circuit))
             .ok_or(VerifierError::NoVkForCircuit)?;
 
         // Parse VK and create verifier
-        let verifier =
-            UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| VerifierError::VkParseError)?;
+        let verifier = UltraHonkVerifier::new(&env, &vk_entry.vk_data)
+            .map_err(|_| VerifierError::VkParseError)?;
 
         // Run full UltraHonk verification
         verifier
@@ -632,7 +680,7 @@ mod test {
         // set_verification_key is admin-only and must work while paused
         // (VK parsing will fail on empty bytes but should not return ContractPaused)
         let vk = Bytes::new(&env);
-        let result = client.try_set_verification_key(&admin, &CircuitType::DealValid, &vk);
+        let result = client.try_set_verification_key(&admin, &CircuitType::DealValid, &vk, &1);
         assert!(matches!(result, Err(Ok(VerifierError::VkParseError))));
     }
 
