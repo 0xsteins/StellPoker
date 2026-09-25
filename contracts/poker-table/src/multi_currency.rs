@@ -73,6 +73,20 @@ pub fn is_currency_whitelisted(env: &Env, token: &Address) -> bool {
     is_whitelisted(env, 0, token)
 }
 
+/// Get currency oracle.
+///
+/// # Parameters
+/// - `table_id`: parameter
+/// - `token`: parameter
+///
+/// # Returns
+/// - `Option<Address>`
+///
+/// # Errors
+/// Returns an error if the operation fails.
+///
+/// # Authorization
+/// Requires appropriate authorization.
 pub fn get_currency_oracle(env: &Env, table_id: u32, token: &Address) -> Option<Address> {
     let key = store_key(table_id);
     let currencies: Map<Address, CurrencyInfo> = env

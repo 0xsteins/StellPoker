@@ -265,6 +265,19 @@ impl HandVerifierContract {
 
     // ── Admin Management Functions ─────────────────────────────────────────
 
+    /// Set zk verifier.
+    ///
+    /// # Parameters
+    /// - `zk_verifier`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), HandVerifierError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_zk_verifier(env: Env, zk_verifier: Option<Address>) -> Result<(), HandVerifierError> {
         Self::require_admin(&env)?;
         if let Some(v) = zk_verifier {
@@ -275,24 +288,74 @@ impl HandVerifierContract {
         Ok(())
     }
 
+    /// Set verification fee.
+    ///
+    /// # Parameters
+    /// - `fee`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), HandVerifierError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn set_verification_fee(env: Env, fee: i128) -> Result<(), HandVerifierError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::VerificationFee, &fee);
         Ok(())
     }
 
+    /// Pause.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Result<(), HandVerifierError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn pause(env: Env) -> Result<(), HandVerifierError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         Ok(())
     }
 
+    /// Unpause.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Result<(), HandVerifierError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn unpause(env: Env) -> Result<(), HandVerifierError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
     }
 
+    /// Transfer admin.
+    ///
+    /// # Parameters
+    /// - `new_admin`: parameter
+    ///
+    /// # Returns
+    /// - `Result<(), HandVerifierError>`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), HandVerifierError> {
         Self::require_admin(&env)?;
         new_admin.require_auth();

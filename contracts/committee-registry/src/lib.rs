@@ -801,6 +801,18 @@ impl CommitteeRegistryContract {
         }
     }
 
+    /// Get timeout config.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `TimeoutConfig`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_timeout_config(env: Env) -> TimeoutConfig {
         env.storage()
             .instance()
@@ -808,6 +820,19 @@ impl CommitteeRegistryContract {
             .expect("not initialized")
     }
 
+    /// Get game liveness.
+    ///
+    /// # Parameters
+    /// - `game_id`: parameter
+    ///
+    /// # Returns
+    /// - `GameLiveness`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn get_game_liveness(env: Env, game_id: u32) -> GameLiveness {
         env.storage()
             .persistent()

@@ -29,6 +29,18 @@ pub struct PlayerInteractionStats {
 }
 
 impl PlayerInteractionStats {
+    /// New.
+    ///
+    /// # Parameters
+    ///
+    /// # Returns
+    /// - `Self`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn new() -> Self {
         Self {
             losses_to_opponent: 0,

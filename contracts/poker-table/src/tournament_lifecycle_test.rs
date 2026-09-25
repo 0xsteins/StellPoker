@@ -50,6 +50,20 @@ impl TournHubMock {
         _p2_pts: i128,
     ) {
     }
+    /// End game.
+    ///
+    /// # Parameters
+    /// - `_session_id`: parameter
+    /// - `_p1_won`: parameter
+    ///
+    /// # Returns
+    /// - `()`
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    ///
+    /// # Authorization
+    /// Requires appropriate authorization.
     pub fn end_game(_env: Env, _session_id: u32, _p1_won: bool) {}
 }
 
