@@ -35,6 +35,43 @@ global TREE_DEPTH: u32 = 6;
 /// per-table-size parameterisation (Issue #7).
 global MAX_PLAYERS: u32 = 6;
 
+/// Enforce that every active seat received two distinct indices and that no
+/// index appears in any other active seat. Keeping this check separate from
+/// full-deck uniqueness makes the cross-seat invariant explicit and directly
+/// testable if deal assignment stops being deterministic in a future circuit.
+fn assert_global_deal_injectivity(
+    card1_indices: [u32; MAX_PLAYERS],
+    card2_indices: [u32; MAX_PLAYERS],
+    num_players: u32,
+) {
+    for seat in 0..MAX_PLAYERS {
+        if seat < num_players {
+            assert(card1_indices[seat] != card2_indices[seat], "seat received duplicate card");
+
+            for other_seat in 0..MAX_PLAYERS {
+                if other_seat < num_players & other_seat > seat {
+                    assert(
+                        card1_indices[seat] != card1_indices[other_seat],
+                        "card dealt to two seats",
+                    );
+                    assert(
+                        card1_indices[seat] != card2_indices[other_seat],
+                        "card dealt to two seats",
+                    );
+                    assert(
+                        card2_indices[seat] != card1_indices[other_seat],
+                        "card dealt to two seats",
+                    );
+                    assert(
+                        card2_indices[seat] != card2_indices[other_seat],
+                        "card dealt to two seats",
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn main(
     // Private inputs (secret-shared in MPC)
     party0_permutation: [u32; 52],
@@ -43,12 +80,10 @@ fn main(
     party0_salts: [Field; 52],
     party1_salts: [Field; 52],
     party2_salts: [Field; 52],
-
     // VRF inputs for public verifiability of randomness
-    vrf_sk: Field,       // VRF private key share
-    vrf_pk: Field,       // VRF public key (public input)
-    vrf_message: Field,  // VRF message (deterministic label for deal)
-
+    vrf_sk: Field, // VRF private key share
+    vrf_pk: Field, // VRF public key (public input)
+    vrf_message: Field, // VRF message (deterministic label for deal)
     // Public inputs
     num_players: pub u32,
 ) -> pub (Field, [Field; MAX_PLAYERS], [u32; MAX_PLAYERS], [u32; MAX_PLAYERS]) {
@@ -61,7 +96,10 @@ fn main(
     // Verify VRF proof for public verifiability of randomness.
     // Anyone with the VRF public key can verify the shuffle seed was correctly derived.
     let (vrf_output, vrf_proof) = vrf::vrf_prove(vrf_sk, vrf_message);
-    assert(vrf::vrf_verify(vrf_pk, vrf_message, shuffle_seed, vrf_proof), "VRF verification failed");
+    assert(
+        vrf::vrf_verify(vrf_pk, vrf_message, shuffle_seed, vrf_proof),
+        "VRF verification failed",
+    );
 
     // Incorporate VRF shuffle seed into the salt contributions.
     // The VRF seed is added to party0's salts; the sum party0+party1+party2+seed
@@ -116,10 +154,24 @@ fn main(
         }
     }
 
-    // 4. Sanity check: verify no duplicate dealt indices (O(n) instead of O(n*n)).
-    // Since indices are deterministic (player p gets cards 2*p and 2*p+1),
-    // we just need to verify that 2*num_players <= deck size (deck-aware).
+    // 4. Enforce global injectivity independently of full-deck uniqueness.
     assert(2 * num_players <= deck::deck_size(), "not enough cards for players");
+    assert_global_deal_injectivity(dealt_card1_indices, dealt_card2_indices, num_players);
 
     (deck_root, hand_commitments, dealt_card1_indices, dealt_card2_indices)
+}
+
+#[test]
+fn test_global_deal_injectivity() {
+    assert_global_deal_injectivity([0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11], 6);
+}
+
+#[test(should_fail_with = "card dealt to two seats")]
+fn test_global_deal_injectivity_rejects_cross_seat_duplicate() {
+    assert_global_deal_injectivity([0, 2, 1, 6, 8, 10], [1, 3, 5, 7, 9, 11], 6);
+}
+
+#[test(should_fail_with = "seat received duplicate card")]
+fn test_global_deal_injectivity_rejects_same_seat_duplicate() {
+    assert_global_deal_injectivity([0, 2, 4, 6, 8, 10], [0, 3, 5, 7, 9, 11], 6);
 }

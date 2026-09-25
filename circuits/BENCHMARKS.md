@@ -112,6 +112,11 @@ testnet.
 
 ### Poseidon2 audit
 
+The parameter decision is recorded in
+[`docs/adr/ADR-004-poseidon2-parameters.md`](../docs/adr/ADR-004-poseidon2-parameters.md).
+All implementations use the shared `t=4` BN254 built-in with pinned Noir round
+constants; custom widths and reduced-round variants are prohibited.
+
 | Circuit | Before | After | Reused commitments |
 | --- | ---: | ---: | --- |
 | `deal_valid` (6 players) | 133 | 121 | 12 dealt-card leaves |

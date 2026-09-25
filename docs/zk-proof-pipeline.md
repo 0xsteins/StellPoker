@@ -96,7 +96,7 @@ Private inputs (deck, salts) never leave the secret-shared domain:
 ## 6. Soroban verification
 
 - Contract: `contracts/zk-verifier/src/lib.rs` — `initialize`,
-  `set_verification_key(circuit, vk_data)`, `verify_proof(circuit, proof,
+  `set_verification_key(circuit, vk_data, version)`, `verify_proof(circuit, proof,
   public_inputs) -> bool`, typed `verify_deal / verify_reveal / verify_showdown`,
   `is_proof_verified`. Crypto: `UltraHonkVerifier::verify` (sumcheck + Shplemini
   opening) in `vendor/ultrahonk-rust-verifier` (`verifier.rs`, `sumcheck.rs`,
